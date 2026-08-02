@@ -415,8 +415,11 @@ static void GroupUnload(Group *g)
 #define ROOF_Y        1.830f
 #define RAIL_Y        1.775f   // underside of the roof slab and of the side rails
 #define DOOR_TOP_Y    1.765f
-#define BELT_Y        1.370f
-#define GLASS_Y0      1.400f
+// Belt line, and the glass sitting 30 mm above it.
+// Measured off references/humvee_v2/ref_06.jpg, a near-side view of the cab: the side glass runs 460 px of the door's 1080, so 0.426 of the leaf rather than the 0.309 these constants used to give.
+// Codex read the old band as an armoured vision slot in renders/humvee_v2/v1/critique.md and again in renders/humvee_v3/v1/critique.md.
+#define BELT_Y        1.273f
+#define GLASS_Y0      1.303f
 #define GLASS_Y1      1.735f
 #define BED_FLOOR_Y   1.100f
 #define BED_TOP_Y     1.420f
@@ -716,10 +719,10 @@ static void BuildCab(void)
 
         // Handle 35 mm in from the leaf's trailing edge, and the two external hinges bridging the shut line at its leading edge.
         // Both are measured off this leaf's own z0/z1: as literals outside the loop the rear handle had drifted to 25 mm from its own hinge.
-        Box(dark, SIDE_W - 0.012f, SIDE_W + 0.022f, 1.250f, 1.310f, z0 + 0.035f, z0 + 0.175f);
+        Box(dark, SIDE_W - 0.012f, SIDE_W + 0.022f, BELT_Y - 0.150f, BELT_Y - 0.090f, z0 + 0.035f, z0 + 0.175f);
         float hz = z1 + 0.0125f;
-        Box(dark, SIDE_W - 0.015f, SIDE_W + 0.025f, 0.800f, 0.850f, hz - 0.0225f, hz + 0.0225f);
-        Box(dark, SIDE_W - 0.015f, SIDE_W + 0.025f, 1.245f, 1.295f, hz - 0.0225f, hz + 0.0225f);
+        Box(dark, SIDE_W - 0.015f, SIDE_W + 0.025f, DOOR_Y0 + 0.120f, DOOR_Y0 + 0.170f, hz - 0.0225f, hz + 0.0225f);
+        Box(dark, SIDE_W - 0.015f, SIDE_W + 0.025f, BELT_Y + 0.135f, BELT_Y + 0.185f, hz - 0.0225f, hz + 0.0225f);
     }
 
     // Wing mirror on two arms, its bracket overlapping the front door's leading window post rather than hanging clear of the body.
