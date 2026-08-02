@@ -37,6 +37,7 @@ typedef struct Builder {
     int indexCount;
     int vertexCap;
     int indexCap;
+    float uvScale;
 } Builder;
 
 static void Reserve(Builder *bd, int verts, int idx)
@@ -57,7 +58,22 @@ static void Reserve(Builder *bd, int verts, int idx)
     }
 }
 
-static unsigned short PushVertex(Builder *bd, Vector3 p, Vector3 n)
+static int ProjectionAxis(Vector3 n)
+{
+    float ax = fabsf(n.x), ay = fabsf(n.y), az = fabsf(n.z);
+    if (ax >= ay && ax >= az) return 0;
+    if (ay >= az) return 1;
+    return 2;
+}
+
+static Vector2 BoxUV(Vector3 p, int axis, float scale)
+{
+    if (axis == 0) return (Vector2){ p.z*scale, p.y*scale };
+    if (axis == 1) return (Vector2){ p.x*scale, p.z*scale };
+    return (Vector2){ p.x*scale, p.y*scale };
+}
+
+static unsigned short PushVertex(Builder *bd, Vector3 p, Vector3 n, Vector2 uv)
 {
     int i = bd->vertexCount++;
     bd->vertices[i*3 + 0] = p.x;
@@ -66,36 +82,47 @@ static unsigned short PushVertex(Builder *bd, Vector3 p, Vector3 n)
     bd->normals[i*3 + 0] = n.x;
     bd->normals[i*3 + 1] = n.y;
     bd->normals[i*3 + 2] = n.z;
-    bd->texcoords[i*2 + 0] = 0.0f;
-    bd->texcoords[i*2 + 1] = 0.0f;
+    bd->texcoords[i*2 + 0] = uv.x;
+    bd->texcoords[i*2 + 1] = uv.y;
     return (unsigned short)i;
 }
 
-static void PushTriN(Builder *bd, Vector3 a, Vector3 b, Vector3 c, Vector3 na, Vector3 nb, Vector3 nc)
+static void PushTriUV(Builder *bd, Vector3 a, Vector3 b, Vector3 c,
+                      Vector3 na, Vector3 nb, Vector3 nc, Vector2 ua, Vector2 ub, Vector2 uc)
 {
     Reserve(bd, 3, 3);
-    unsigned short ia = PushVertex(bd, a, na);
-    unsigned short ib = PushVertex(bd, b, nb);
-    unsigned short ic = PushVertex(bd, c, nc);
+    unsigned short ia = PushVertex(bd, a, na, ua);
+    unsigned short ib = PushVertex(bd, b, nb, ub);
+    unsigned short ic = PushVertex(bd, c, nc, uc);
     bd->indices[bd->indexCount++] = ia;
     bd->indices[bd->indexCount++] = ib;
     bd->indices[bd->indexCount++] = ic;
 }
 
-static void PushQuadN(Builder *bd, Vector3 a, Vector3 b, Vector3 c, Vector3 d,
-                      Vector3 na, Vector3 nb, Vector3 nc, Vector3 nd)
+static void PushQuadUV(Builder *bd, Vector3 a, Vector3 b, Vector3 c, Vector3 d,
+                       Vector3 na, Vector3 nb, Vector3 nc, Vector3 nd,
+                       Vector2 ua, Vector2 ub, Vector2 uc, Vector2 ud)
 {
     Reserve(bd, 4, 6);
-    unsigned short ia = PushVertex(bd, a, na);
-    unsigned short ib = PushVertex(bd, b, nb);
-    unsigned short ic = PushVertex(bd, c, nc);
-    unsigned short id = PushVertex(bd, d, nd);
+    unsigned short ia = PushVertex(bd, a, na, ua);
+    unsigned short ib = PushVertex(bd, b, nb, ub);
+    unsigned short ic = PushVertex(bd, c, nc, uc);
+    unsigned short id = PushVertex(bd, d, nd, ud);
     bd->indices[bd->indexCount++] = ia;
     bd->indices[bd->indexCount++] = ib;
     bd->indices[bd->indexCount++] = ic;
     bd->indices[bd->indexCount++] = ia;
     bd->indices[bd->indexCount++] = ic;
     bd->indices[bd->indexCount++] = id;
+}
+
+static void PushQuadN(Builder *bd, Vector3 a, Vector3 b, Vector3 c, Vector3 d,
+                      Vector3 na, Vector3 nb, Vector3 nc, Vector3 nd)
+{
+    int axis = ProjectionAxis(Vector3Add(Vector3Add(na, nb), Vector3Add(nc, nd)));
+    PushQuadUV(bd, a, b, c, d, na, nb, nc, nd,
+               BoxUV(a, axis, bd->uvScale), BoxUV(b, axis, bd->uvScale),
+               BoxUV(c, axis, bd->uvScale), BoxUV(d, axis, bd->uvScale));
 }
 
 static void PushQuad(Builder *bd, Vector3 a, Vector3 b, Vector3 c, Vector3 d)
@@ -180,6 +207,19 @@ static void PushRevolveZ(Builder *bd, Vector3 center, const float *pz, const flo
     BlendProfileNormals(mr, ma, n - 1, sr, sa, 0);
     BlendProfileNormals(mr, ma, n - 1, er, ea, 1);
 
+    float arc[MAX_REVOLVE];
+    float rMax = 0.0f;
+    arc[0] = 0.0f;
+    for (int j = 0; j < n - 1; j++) {
+        float dz = pz[j + 1] - pz[j], dr = pr[j + 1] - pr[j];
+        arc[j + 1] = arc[j] + sqrtf(dz*dz + dr*dr);
+        if (pr[j] > rMax) rMax = pr[j];
+        if (pr[j + 1] > rMax) rMax = pr[j + 1];
+    }
+
+    int reps = (int)roundf(2.0f*PI*rMax*bd->uvScale);
+    if (reps < 1) reps = 1;
+
     for (int j = 0; j < n - 1; j++) {
         float z0 = pz[j], r0 = pr[j], z1 = pz[j + 1], r1 = pr[j + 1];
         if (fabsf(z1 - z0) < 1e-6f && fabsf(r1 - r0) < 1e-6f) continue;
@@ -198,9 +238,14 @@ static void PushRevolveZ(Builder *bd, Vector3 center, const float *pz, const flo
             Vector3 n10 = { er[j]*c0, er[j]*s0, ea[j] };
             Vector3 n11 = { er[j]*c1, er[j]*s1, ea[j] };
 
-            if (r0 < 1e-6f) PushTriN(bd, p00, p11, p10, n00, n11, n10);
-            else if (r1 < 1e-6f) PushTriN(bd, p00, p01, p11, n00, n01, n11);
-            else PushQuadN(bd, p00, p01, p11, p10, n00, n01, n11, n10);
+            float u0 = (float)reps*(float)i/(float)segments;
+            float u1 = (float)reps*(float)(i + 1)/(float)segments;
+            float v0 = arc[j]*bd->uvScale, v1 = arc[j + 1]*bd->uvScale;
+            Vector2 t00 = { u0, v0 }, t01 = { u1, v0 }, t10 = { u0, v1 }, t11 = { u1, v1 };
+
+            if (r0 < 1e-6f) PushTriUV(bd, p00, p11, p10, n00, n11, n10, t00, t11, t10);
+            else if (r1 < 1e-6f) PushTriUV(bd, p00, p01, p11, n00, n01, n11, t00, t01, t11);
+            else PushQuadUV(bd, p00, p01, p11, p10, n00, n01, n11, n10, t00, t01, t11, t10);
         }
     }
 }
@@ -441,6 +486,54 @@ static void BuildRunningGear(Builder *dark, Builder *metal)
     }
 }
 
+static float Hash01(int x, int y, unsigned int seed)
+{
+    unsigned int h = (unsigned int)x*374761393u + (unsigned int)y*668265263u + seed*1442695041u;
+    h = (h ^ (h >> 13))*1274126177u;
+    h ^= h >> 16;
+    return (float)(h & 0xFFFFFFu)/(float)0xFFFFFFu;
+}
+
+static float TileNoise(float u, float v, int cells, unsigned int seed)
+{
+    float fx = u*(float)cells, fy = v*(float)cells;
+    int x0 = ((int)floorf(fx) % cells + cells) % cells;
+    int y0 = ((int)floorf(fy) % cells + cells) % cells;
+    int x1 = (x0 + 1) % cells, y1 = (y0 + 1) % cells;
+    float tx = fx - floorf(fx), ty = fy - floorf(fy);
+    tx = tx*tx*(3.0f - 2.0f*tx);
+    ty = ty*ty*(3.0f - 2.0f*ty);
+
+    float a = Hash01(x0, y0, seed), b = Hash01(x1, y0, seed);
+    float c = Hash01(x0, y1, seed), d = Hash01(x1, y1, seed);
+    return Lerp(Lerp(a, b, tx), Lerp(c, d, tx), ty);
+}
+
+static Texture2D MakeGrain(int size, int cells, float low, float high, unsigned int seed)
+{
+    Color *px = (Color *)MemAlloc(size*size*sizeof(Color));
+
+    for (int y = 0; y < size; y++) {
+        for (int x = 0; x < size; x++) {
+            float u = (float)x/(float)size, v = (float)y/(float)size;
+            float n = 0.56f*TileNoise(u, v, cells, seed)
+                    + 0.30f*TileNoise(u, v, cells*2, seed + 1u)
+                    + 0.14f*TileNoise(u, v, cells*4, seed + 2u);
+            unsigned char g = (unsigned char)(255.0f*Clamp(Lerp(low, high, n), 0.0f, 1.0f));
+            px[y*size + x] = (Color){ g, g, g, 255 };
+        }
+    }
+
+    Image img = { px, size, size, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
+    Texture2D tex = LoadTextureFromImage(img);
+    UnloadImage(img);
+
+    GenTextureMipmaps(&tex);
+    SetTextureFilter(tex, TEXTURE_FILTER_TRILINEAR);
+    SetTextureWrap(tex, TEXTURE_WRAP_REPEAT);
+    return tex;
+}
+
 static Mesh FinishMesh(Builder *bd)
 {
     Mesh mesh = { 0 };
@@ -467,9 +560,14 @@ static const Color partColors[PART_COUNT] = {
     { 168,  46,  40, 255 },
 };
 
+static Texture2D grain[PART_COUNT];
+
+static const float partUvScale[PART_COUNT] = { 2.0f, 3.4f, 2.7f, 2.0f, 2.0f, 2.0f };
+
 static void Init(void)
 {
     Builder builders[PART_COUNT] = { 0 };
+    for (int i = 0; i < PART_COUNT; i++) builders[i].uvScale = partUvScale[i];
 
     BuildHull(&builders[PART_BODY], &builders[PART_DARK]);
     BuildCab(&builders[PART_BODY]);
@@ -480,9 +578,14 @@ static void Init(void)
     BuildGlass(&builders[PART_GLASS]);
     BuildRunningGear(&builders[PART_DARK], &builders[PART_METAL]);
 
+    grain[PART_BODY] = MakeGrain(256, 16, 0.90f, 1.0f, 11u);
+    grain[PART_DARK] = MakeGrain(256, 12, 0.82f, 1.0f, 29u);
+    grain[PART_METAL] = MakeGrain(256, 14, 0.86f, 1.0f, 47u);
+
     for (int i = 0; i < PART_COUNT; i++) {
         parts[i] = LoadModelFromMesh(FinishMesh(&builders[i]));
         parts[i].materials[0].maps[MATERIAL_MAP_DIFFUSE].color = partColors[i];
+        if (grain[i].id != 0) parts[i].materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = grain[i];
         HarnessApplyLighting(&parts[i]);
     }
 }
@@ -494,7 +597,10 @@ static void Draw(void)
 
 static void Unload(void)
 {
-    for (int i = 0; i < PART_COUNT; i++) UnloadModel(parts[i]);
+    for (int i = 0; i < PART_COUNT; i++) {
+        UnloadModel(parts[i]);
+        if (grain[i].id != 0) UnloadTexture(grain[i]);
+    }
 }
 
 const Scene SCENE = {
