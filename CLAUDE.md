@@ -21,13 +21,17 @@ make clean-raylib                    # force a full raylib rebuild
 ./build/humvee --list-parts          # print this model's part names
 ./build/humvee --part wheels         # inspect one part, framed to its own bounds
 ./build/humvee --shots out --frames 6 --size 1600x1200 --supersample 3
+./build/crank_slider --shots out --anim --frames 8   # step the pose instead of orbiting the camera
 
 ./tools/review.sh humvee             # build, render into the next renders/humvee/vN/, critique with Codex
 PART=wheels ./tools/review.sh humvee
 FRAMES=8 ./tools/review.sh humvee "pay attention to the wheel arches"
+ANIM=1 ./tools/review.sh crank_slider
 ```
 
 `--shots` renders N evenly spaced turntable views and exits, printing each written path. Without it the binary opens a window.
+
+`--anim` changes what those N frames vary: the camera holds still at `SCENE.animYaw` and the pose steps through one `SCENE.duration`. It is ignored, with a warning, on a scene that declares no `update`.
 
 After a fresh clone: `git submodule update --init` then `make`.
 
@@ -42,6 +46,9 @@ const Scene SCENE = {
     .init = Init,             // build meshes here, not at file scope: needs a GL context
     .draw = Draw,             // optional if .parts is set; called inside BeginMode3D
     .unload = Unload,
+    .update = Update,         // optional; called with the pose time before every draw
+    .duration = 2.4f,         // seconds in one cycle of that motion
+    .animYaw = 90.0f,         // camera yaw --anim holds; 0 means the default 45
     .parts = PARTS,           // optional
     .partCount = 3,
     .target = { 0, 0, 0 },    // camera look-at
@@ -74,11 +81,38 @@ static const Part PARTS[] = {
 
 **Derive `bounds` from the built mesh, not from hand-written constants.** `models/humvee.c` unions `GetModelBoundingBox` over each group's meshes during `init` and stores the result, so the framing cannot drift out of sync when the geometry changes.
 
+**Place a part against its parent, not against the world.** Derive a child's position from the dimension it attaches to, or build it in the parent's frame. Every placement defect this project has shipped was an absolute coordinate that quietly stopped agreeing with a parent someone edited:
+
+- The blackout lamp hung 3 mm below the housing it sits in, because the housing lost 50 mm of height in the same edit and its two lamps were separate literals (`git show 56bc1c3`, and the three coupled numbers at `models/humvee_v2.c:554`).
+- The antenna mount floated 0.26 m above the bed and 30 mm outboard of it (`renders/humvee_v2/v1/critique.md`). The fix was to type `BED_TOP_Y` into the child, `models/humvee_v2.c:748`: this rule, applied once by hand after the defect.
+- Four joints met their parent on an exactly coincident plane, fixed by 24 hand-adjusted literals (`renders/humvee_v2/v4/critique.md`). A child written as `parent_face - 0.010` expresses 10 mm of embedment structurally and cannot be typed wrong.
+- The rear door's handle sits 25 mm from its own hinge. `models/humvee_v2.c:665` loops the two door skins over a table, but the handles at `models/humvee_v2.c:675` and the hinges at `models/humvee_v2.c:680` are literals outside that loop, so the front door got a handle 35 mm from its trailing edge and the rear door got one 15 mm from its upper hinge. Five Codex rounds passed over it, and `renders/humvee_v2/v5/critique.md` signed the handles off, because the two straddle the B-pillar and read as symmetric in a turntable still. This one is still open.
+
+`models/penguin.c:672` already makes this argument for a single joint, hanging the flipper off `BodyEllipse` rather than a second set of hand-copied numbers "that would drift out of step with it". It is the same rule as deriving `bounds` from the mesh, applied to the thing that has actually drifted four times: where a part goes.
+
 `--part NAME` draws only that part and frames the camera from its `bounds` callback, so a small part fills the view instead of appearing as a speck at the model's usual orbit distance. `bounds` is optional; without it the part is drawn at the scene's normal framing.
 
 If `.draw` is NULL the harness draws every part in order, so a part-based model needs no separate assembled draw function. If `.draw` is set it wins, and parts are only used for isolation.
 
 Prefer parts over separate model files once a model has more than two or three distinct pieces: parts keep shared constants and helpers in one translation unit, and give the review loop a way to look at one piece at a time.
+
+## Posing
+
+**Most models are static and should stay so.** Split into posable parts only when the subject actually articulates, and never at the cost of the review-isolation split above: `--part` exists to answer "what is happening at that crossing", and a decomposition that serves motion instead of inspection trades a lever that works for one nobody has asked for. `models/ak47.c` is the case against doing it by default: `front_sight`, `barrel`, `handguards` and `stock` never move, and merging them into one node to satisfy a motion split would destroy four useful inspection views.
+
+A part is posable when three things are true, and `models/crank_slider.c` is the worked example of all three:
+
+- **Its geometry is authored in its own frame, about its own pivot.** The crankshaft's local origin sits on its axis of rotation, so its pose is a bare `MatrixRotateX`. The connecting rod's local origin is its big-end centre and its small end is at local `(0, ROD_L, 0)`, so both joints are points the pose code can name.
+- **Its root is closed, or buried inside its parent.** This is what rules out most of `models/penguin.c`: the bill, flippers and tail are all lofted with `capA = false` (`models/penguin.c:669`, `models/penguin.c:733`, `models/penguin.c:741`), their roots deliberately sunk into the body so no cap shows. Rotate one and the open tube end swings into view.
+- **It is its own mesh.** `MirrorX` copies the mirrored half into the _same_ `Builder`, so both penguin flippers are one mesh and both feet are one mesh; `BuildWheel` in `models/humvee_v2.c` emits tyre, rim, half shaft, wishbones and damper into the same two builders and is then called twice and mirrored, so all four corners are one mesh. Nothing in either can move alone.
+
+**Apply the pose as `model.transform`, and rebuild it every frame in `update`.** Set `model.transform = M` and draw at the origin with scale 1; `DrawModel` composes an identity onto it, so `M` passes through untouched. Keep the current pose of every node in one function, so there is exactly one place where a placement can be wrong.
+
+**A moving part has no single bounding box.** Sample the pose over the cycle and union the eight transformed corners of the local box, as `SweepBounds` in `models/crank_slider.c` does. Do not hand the job to raylib: `GetModelBoundingBox` transforms only the box's own min and max corner and carries the warning "does not support rotation transformations" (`vendor/raylib/src/rmodels.c:1243`), so a rotating part frames wrong under `--part`.
+
+**Measure the constraint instead of asserting it.** A linkage's joints can be wrong without looking wrong in any single frame. `CheckJoints` in `models/crank_slider.c` walks 720 crank angles at build time, measures the distance from each rod end to the pin it is supposed to sit on, and logs a warning past 0.01 mm; it currently reports 0.00001 mm, which is float rounding. This is the same rule as the mesh claims below: compute the answer, do not argue for it.
+
+**Skinning is not available.** `UpdateModelAnimationBones` needs bone attributes the harness's shader does not declare (`vendor/raylib/examples/shaders/resources/shaders/glsl330/lighting.vs` has only position, texcoord, normal and colour), and the CPU path `UpdateModelAnimation` still needs `boneIds`/`boneWeights` that no builder here emits. So a deforming surface cannot be posed at all, and a continuous loft split at a joint will simply come apart. Rigid nodes are the only option.
 
 ## References come first
 
@@ -146,6 +180,8 @@ If a worktree is locked, read `.git/worktrees/<name>/locked` before unlocking it
 ## Reviewing with Codex
 
 `tools/review.sh` runs `codex exec --sandbox read-only -i <png>...` with a prompt naming the source file, so Codex reads the code and looks at the images together. Read-only is intentional: Codex critiques, Claude implements.
+
+`ANIM=1` renders with `--anim` and tells Codex the frames differ by pose rather than viewpoint, so it judges whether parts stay connected as they move and treats a defect visible in only one frame as a defect. Use it for a posed model: a turntable of one frozen pose cannot answer whether a joint separates.
 
 The prompt puts lighting, exposure, contrast, colour washout, background and antialiasing explicitly out of scope. Those belong to the harness, not to any model, and Codex otherwise reports them every single run. If a critique raises them anyway, ignore it.
 
