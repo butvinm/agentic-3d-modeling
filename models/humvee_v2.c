@@ -206,6 +206,39 @@ static void Tube(Builder *bd, Vector3 a, Vector3 b, float r0, float r1, int side
     }
 }
 
+// Helical wire, swept as a circle along the helix using an analytic frame.
+// The frame's radial vector is exactly perpendicular to the tangent, so B = T x N closes a right-handed triad and the quads come out facing outwards.
+static void CoilRing(Vector3 *pos, Vector3 *nrm, Vector3 base, float coilR, float wireR,
+                     float height, float turns, float t, int sides)
+{
+    float phi = 2.0f * PI * turns * t;
+    Vector3 c = { base.x + coilR * cosf(phi), base.y + height * t, base.z + coilR * sinf(phi) };
+    Vector3 tangent = Vector3Normalize((Vector3){
+        -coilR * 2.0f * PI * turns * sinf(phi), height, coilR * 2.0f * PI * turns * cosf(phi) });
+    Vector3 n = { cosf(phi), 0.0f, sinf(phi) };
+    Vector3 bi = Vector3Normalize(Vector3CrossProduct(tangent, n));
+
+    for (int j = 0; j <= sides; j++) {
+        float v = 2.0f * PI * (float)j / (float)sides;
+        Vector3 r = Vector3Add(Vector3Scale(n, cosf(v)), Vector3Scale(bi, sinf(v)));
+        nrm[j] = r;
+        pos[j] = Vector3Add(c, Vector3Scale(r, wireR));
+    }
+}
+
+static void Coil(Builder *b, Vector3 base, float coilR, float wireR, float height, float turns, int segs, int sides)
+{
+    Vector3 p0[17], n0[17], p1[17], n1[17];
+    CoilRing(p0, n0, base, coilR, wireR, height, turns, 0.0f, sides);
+    for (int i = 0; i < segs; i++) {
+        CoilRing(p1, n1, base, coilR, wireR, height, turns, (float)(i + 1) / (float)segs, sides);
+        for (int j = 0; j < sides; j++) {
+            QuadN(b, p0[j], p0[j + 1], p1[j + 1], p1[j], n0[j], n0[j + 1], n1[j + 1], n1[j]);
+        }
+        for (int j = 0; j <= sides; j++) { p0[j] = p1[j]; n0[j] = n1[j]; }
+    }
+}
+
 // Surface of revolution about the X axis.
 // Each profile point is (axial offset from centre, radius); the profile is walked in order and normals come from the profile tangent, so the result is smooth along the sweep as well as around it.
 static void RevolveX(Builder *b, Vector3 centre, const Vector2 *prof, int n, int segments)
@@ -499,6 +532,8 @@ static void BuildFront(void)
 
     // Tow shackle bracket on the bumper face.
     Box(metal, 0.380f, 0.480f, 0.520f, 0.640f, 2.350f, 2.430f);
+    // Hood latch, sitting on the sloped hood skin near its front corner.
+    Box(metal, 0.500f, 0.600f, 1.055f, 1.080f, 2.140f, 2.190f);
 
     GroupMirrorX(g, m);
 
@@ -531,8 +566,8 @@ static void BuildCab(void)
         Hex(dark, c);
     }
 
-    // Cowl: the shelf between the hood and the base of the windscreen.
-    Box(body, -SIDE_W, SIDE_W, 1.100f, COWL_Y, COWL_Z, HOOD_BACK_Z);
+    // Cowl: the shelf between the hood and the base of the windscreen, carried down to the sill so no void is left between the engine bay and the cab.
+    Box(body, -SIDE_W, SIDE_W, SILL_Y, COWL_Y, COWL_Z, HOOD_BACK_Z);
 
     // Windscreen, raked 45 degrees. Glass first, then the frame around it.
     {
@@ -589,6 +624,18 @@ static void BuildCab(void)
         Box(body, CAB_IN, SIDE_W - 0.010f, GLASS_Y0, GLASS_Y1, z1 - 0.040f, z1);
         Box(glass, CAB_IN, SIDE_W - 0.040f, GLASS_Y0, GLASS_Y1, z0 + 0.040f, z1 - 0.040f);
     }
+    Box(dark, SIDE_W - 0.012f, SIDE_W + 0.022f, 1.250f, 1.310f, -0.155f, -0.015f);
+    Box(dark, SIDE_W - 0.012f, SIDE_W + 0.022f, 1.250f, 1.310f, -0.475f, -0.335f);
+
+    // Wing mirror on two arms off the A-pillar, standing outboard of the body as it does on the real truck.
+    Box(dark, SIDE_W, 0.905f, 1.400f, 1.640f, 0.500f, 0.570f);
+    Tube(dark, (Vector3){ 0.900f, 1.430f, 0.545f }, (Vector3){ 1.140f, 1.405f, 0.475f }, 0.017f, 0.017f, 8, true, true);
+    Tube(dark, (Vector3){ 0.900f, 1.610f, 0.545f }, (Vector3){ 1.140f, 1.595f, 0.475f }, 0.017f, 0.017f, 8, true, true);
+    Box(dark, 1.120f, 1.290f, 1.350f, 1.660f, 0.415f, 0.480f);
+    Box(glass, 1.135f, 1.275f, 1.370f, 1.640f, 0.405f, 0.417f);
+
+    // Wiper, laid 20 mm proud of the windscreen: both ends satisfy y + z = 1.868, the plane's own equation offset along its normal.
+    Tube(dark, (Vector3){ 0.180f, 1.308f, 0.560f }, (Vector3){ 0.500f, 1.468f, 0.400f }, 0.012f, 0.012f, 8, true, true);
 
     GroupMirrorX(g, m);
     GroupFinish(g, "cab");
@@ -625,8 +672,18 @@ static void BuildBed(void)
     // Tail lights.
     Box(tail, 0.620f, 0.780f, 1.180f, 1.320f, TAIL_Z - 0.090f, TAIL_Z - 0.058f);
     Box(lamp, 0.620f, 0.780f, 1.100f, 1.170f, TAIL_Z - 0.090f, TAIL_Z - 0.058f);
+    // Gusset carrying the cantilevered end of the bumper up to the rear flare.
+    Box(metal, 0.880f, 1.060f, 0.720f, 0.950f, BUMP_R_Z + 0.020f, TAIL_Z);
 
     GroupMirrorX(g, m);
+
+    // Whip antenna on the right rear corner, and the fuel filler on the left, both of which the real truck carries on one side only.
+    Box(metal, 0.900f, 1.010f, BED_TOP_Y, BED_TOP_Y + 0.070f, -1.990f, -1.880f);
+    Tube(metal, (Vector3){ 0.955f, BED_TOP_Y + 0.070f, -1.935f }, (Vector3){ 0.985f, 2.420f, -1.935f },
+         0.014f, 0.006f, 8, false, true);
+    Tube(metal, (Vector3){ -SIDE_W - 0.014f, 1.280f, -1.320f }, (Vector3){ -SIDE_W + 0.010f, 1.280f, -1.320f },
+         0.058f, 0.058f, 16, true, false);
+
     GroupFinish(g, "bed");
 }
 
@@ -636,12 +693,28 @@ static void BuildBed(void)
 
 // Half-section of a 37x12.5R16.5, walked from the inboard bead round the tread to the outboard bead.
 // x is the offset from the wheel centre plane.
+// The carcass crown stops at 0.450 and the tread lugs stand 20 mm proud of it, so the overall radius is TIRE_R and the tyre rests exactly on the ground plane.
 static const Vector2 TIRE_PROFILE[] = {
-    { -0.100f, RIM_R }, { -0.146f, 0.258f }, { -0.160f, 0.330f }, { -0.162f, 0.408f },
-    { -0.150f, 0.452f }, { -0.118f, 0.468f }, { -0.062f, 0.472f }, {  0.062f, 0.472f },
-    {  0.118f, 0.468f }, {  0.150f, 0.452f }, {  0.162f, 0.408f }, {  0.160f, 0.330f },
+    { -0.100f, RIM_R }, { -0.146f, 0.258f }, { -0.160f, 0.330f }, { -0.162f, 0.400f },
+    { -0.150f, 0.432f }, { -0.118f, 0.446f }, { -0.062f, 0.450f }, {  0.062f, 0.450f },
+    {  0.118f, 0.446f }, {  0.150f, 0.432f }, {  0.162f, 0.400f }, {  0.160f, 0.330f },
     {  0.146f, 0.258f }, {  0.100f, RIM_R },
 };
+
+#define TREAD_LUGS 20
+
+// A block on the tread, addressed in the wheel's own (axial, radial, angular) frame.
+// That frame is right-handed in the same sense as (x, y, z), so the hexahedron winding still resolves outwards.
+static void LugBlock(Builder *b, float zc, float u0, float u1, float r0, float r1, float t0, float t1)
+{
+#define WP(u, r, t) (Vector3){ (u), AXLE_Y + (r) * cosf(t), zc + (r) * sinf(t) }
+    Vector3 c[8] = {
+        WP(u0, r0, t0), WP(u1, r0, t0), WP(u1, r0, t1), WP(u0, r0, t1),
+        WP(u0, r1, t0), WP(u1, r1, t0), WP(u1, r1, t1), WP(u0, r1, t1),
+    };
+#undef WP
+    Hex(b, c);
+}
 
 static void BuildWheel(Group *g, float zc)
 {
@@ -650,6 +723,15 @@ static void BuildWheel(Group *g, float zc)
     Vector3 hub = { TRACK_HW, AXLE_Y, zc };
 
     RevolveX(dark, hub, TIRE_PROFILE, (int)(sizeof(TIRE_PROFILE) / sizeof(TIRE_PROFILE[0])), 40);
+
+    // Directional tread: two staggered rows of lugs making a chevron.
+    const float pitch = 2.0f * PI / (float)TREAD_LUGS;
+    for (int i = 0; i < TREAD_LUGS; i++) {
+        float t = pitch * (float)i;
+        LugBlock(dark, zc, hub.x + 0.008f, hub.x + 0.122f, 0.442f, TIRE_R, t - 0.052f, t + 0.052f);
+        LugBlock(dark, zc, hub.x - 0.122f, hub.x - 0.008f, 0.442f, TIRE_R,
+                 t + pitch * 0.5f - 0.052f, t + pitch * 0.5f + 0.052f);
+    }
 
     // Rim: barrel between the beads, dished outer face, hub boss and lug nuts.
     Tube(metal, (Vector3){ hub.x - 0.100f, hub.y, hub.z }, (Vector3){ hub.x + 0.100f, hub.y, hub.z },
@@ -664,14 +746,19 @@ static void BuildWheel(Group *g, float zc)
         Tube(metal, p, (Vector3){ p.x + 0.024f, p.y, p.z }, 0.020f, 0.020f, 6, false, true);
     }
 
-    // Differential on the centreline, half shaft out to the hub.
-    Tube(metal, (Vector3){ 0.300f, hub.y, zc }, (Vector3){ 0.700f, hub.y, zc }, 0.036f, 0.036f, 10, true, true);
-    // Upper and lower control arms.
+    // Half shaft from the differential out to the hub carrier.
+    Tube(metal, (Vector3){ 0.160f, hub.y, zc }, (Vector3){ 0.800f, hub.y, zc }, 0.036f, 0.036f, 10, true, true);
+    Box(metal, 0.700f, 0.800f, 0.320f, 0.660f, zc - 0.090f, zc + 0.090f);
+
+    // Double wishbone. The coil sits behind the axle and the damper ahead of it, so neither fouls the upper arm.
     Box(metal, 0.240f, 0.760f, 0.630f, 0.680f, zc - 0.070f, zc + 0.070f);
-    Box(metal, 0.220f, 0.780f, 0.340f, 0.400f, zc - 0.090f, zc + 0.090f);
-    // Shock absorber.
-    Tube(metal, (Vector3){ 0.560f, 0.400f, zc + 0.020f }, (Vector3){ 0.500f, 0.860f, zc + 0.020f },
-         0.036f, 0.030f, 10, true, true);
+    Box(metal, 0.220f, 0.780f, 0.340f, 0.400f, zc - 0.100f, zc + 0.100f);
+    Box(metal, 0.560f, 0.740f, 0.530f, 0.575f, zc + 0.100f, zc + 0.260f);
+    Coil(metal, (Vector3){ 0.650f, 0.575f, zc + 0.180f }, 0.070f, 0.016f, 0.385f, 5.0f, 56, 8);
+    Box(metal, 0.560f, 0.740f, 0.960f, 0.995f, zc + 0.100f, zc + 0.260f);
+    Tube(metal, (Vector3){ 0.620f, 0.400f, zc - 0.190f }, (Vector3){ 0.560f, 0.980f, zc - 0.190f },
+         0.032f, 0.026f, 10, true, true);
+    Box(metal, 0.520f, 0.640f, 0.960f, 1.005f, zc - 0.235f, zc - 0.145f);
 }
 
 static void BuildGear(void)
@@ -684,11 +771,11 @@ static void BuildGear(void)
     BuildWheel(g, AXLE_R);
     GroupMirrorX(g, m);
 
-    // Differential housings, offset from the centreline as on the real truck.
+    // Differential housings, centred so both half shafts meet them.
     Vector2 diff[] = { { -0.170f, 0.030f }, { -0.130f, 0.130f }, { -0.050f, 0.168f },
                        {  0.050f, 0.168f }, {  0.130f, 0.130f }, {  0.170f, 0.030f } };
-    RevolveX(metal, (Vector3){ 0.120f, AXLE_Y, AXLE_F }, diff, 6, 20);
-    RevolveX(metal, (Vector3){ 0.120f, AXLE_Y, AXLE_R }, diff, 6, 20);
+    RevolveX(metal, (Vector3){ 0.0f, AXLE_Y, AXLE_F }, diff, 6, 20);
+    RevolveX(metal, (Vector3){ 0.0f, AXLE_Y, AXLE_R }, diff, 6, 20);
 
     GroupFinish(g, "running_gear");
 }
@@ -744,18 +831,28 @@ const Scene SCENE = {
         "0.47 radius and 0.324 width. Origin sits on the ground at the centre of the\n"
         "wheelbase, +Z forward.\n"
         "\n"
-        "Five parts: hull (belly pan, frame rails, sills, transfer case, exhaust),\n"
-        "front (engine bay, hood, fenders, eight-slat grille, headlights, bumper),\n"
-        "cab (cowl, 45-degree windscreen, A/B/C pillars, four doors with glass, roof),\n"
-        "bed (cargo box, rear flares, tailgate, tail lights, rear bumper) and\n"
-        "running_gear (tyres, rims, half shafts, control arms, shocks, differentials).\n"
+        "Five parts. hull: belly pan upswept at both ends, frame rails, door sills,\n"
+        "transfer case, propeller shafts, exhaust. front: engine bay, separate hood\n"
+        "slab in a trough between raised fender crowns, arched fenders, eight-slat\n"
+        "grille, protruding headlight housings with main and blackout lamps, corner\n"
+        "markers, bumper with tow shackle brackets, hood latches. cab: cowl,\n"
+        "45-degree windscreen with wipers, A/B/C pillars, four doors with glass and\n"
+        "handles, roof, rear window, wing mirrors on twin arms. bed: cargo box, rear\n"
+        "flares with a flat shelf on top, tailgate, tail lights, rear bumper on\n"
+        "gussets, whip antenna on the right rear corner, fuel filler on the left.\n"
+        "running_gear: tyres, rims with eight lug nuts, half shafts, double\n"
+        "wishbones, coil springs, dampers, centred differentials.\n"
         "\n"
         "Construction: everything is either a hexahedron with eight freely placed\n"
         "corners or a surface of revolution. Wheel openings are cut by sweeping\n"
         "vertical strips 28 mm apart whose floor follows the 0.60 radius arch circle\n"
-        "about the axle, leaving 0.13 of clearance over the tyre. Tyres are a\n"
-        "14-point section revolved in 40 segments. The right half of each part is\n"
-        "built once and mirrored through x = 0.",
+        "about the axle, leaving 0.13 of clearance over the tyre. The body core stops\n"
+        "at x = 0.56 and the strip out to 0.68 is arched away too, so the wheel well\n"
+        "is a real cavity holding the suspension. Tyres are a 14-point section\n"
+        "revolved in 40 segments, carcass crown at 0.450, with 20 pairs of staggered\n"
+        "tread lugs standing 20 mm proud to reach the 0.470 rolling radius. Coil\n"
+        "springs are a circle swept along a helix on an analytic frame. The right\n"
+        "half of each part is built once and mirrored through x = 0.",
     .init = Init,
     .unload = Unload,
     .parts = PARTS,
