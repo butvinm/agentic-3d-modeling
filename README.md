@@ -1,6 +1,8 @@
 # Rendering
 
-Models: `ak47`, `crank_slider`, `humvee`, `humvee_v2`, `penguin`, `torus_knot`.
+Models: `ak47`, `crank_slider`, `humvee`, `humvee_v2`, `humvee_v3`, `penguin`, `torus_knot`.
+
+`humvee_v3` is `humvee_v2`'s geometry surfaced with procedural camouflage and with lit lamps. `humvee_v2` stays flat-shaded, because a critique has to read form from shading and camouflage is what most gets in the way of that.
 
 ## Build
 
