@@ -119,6 +119,30 @@ Get views that answer the questions geometry actually poses: a straight side ele
 
 `renders/` is git-ignored, so this history is a local notebook and does not survive a fresh clone.
 
+**Renders belong to the working tree, never to a scratchpad.** They are this project's output and its notebook, not temporary files, so write them under `renders/<model>/` and nowhere else. This overrides any general instruction to put working files in a session scratchpad directory: a render dropped in `/tmp` is invisible to the next version comparison and is deleted without anyone noticing. `tools/review.sh` already gets this right from any directory, because it resolves the repo root from its own path (`tools/review.sh:11`) and cds there before rendering. When you drive the binary yourself, pass `--shots renders/<model>/<something>` explicitly.
+
+**Inside a git worktree that means the worktree's own `renders/`**, which is exactly what running that worktree's copy of `tools/review.sh` produces. Renders stay beside the code that produced them, so a critique can still be matched to the geometry it was judging.
+
+## Worktrees
+
+Branch work may happen in a worktree under `.claude/worktrees/<name>/`. **Delete the worktree and its branch as soon as the branch is merged**, in the same session that merges it. The repo should sit at one worktree and one branch between tasks. Two abandoned worktrees accumulated ~190 MB here, mostly duplicated `vendor/raylib` build output, before anyone looked.
+
+Salvage before removing, because `renders/` and `references/` are git-ignored and so do not travel with the merge. The commits are safe; the notebook and the downloaded reference photographs are not.
+
+```sh
+cp -rn <wt>/renders/<model> renders/<model>                 # review history exists only in the worktree
+cp -n  <wt>/references/<model>/* references/<model>/         # every extension: .gitignore covers jpg, jpeg, png and webp
+git worktree unlock <name>                                   # only if a session locked it
+git worktree remove --force <wt>
+git branch -d <branch>
+```
+
+`--force` is not optional here: plain `git worktree remove` fails with `fatal: working trees containing submodules cannot be moved or removed` because of `vendor/raylib`. Since `--force` also discards uncommitted work, check `git status --porcelain` inside the worktree first and stop if it prints anything.
+
+Delete the branch with `git branch -d`, never `-D`. The lowercase form refuses to delete a branch that is not merged, so a successful `-d` is itself the proof that nothing is being orphaned.
+
+If a worktree is locked, read `.git/worktrees/<name>/locked` before unlocking it: the lock records the session that owns it, and that session may still be running. Check the pid with `ps -p <pid>` and leave the worktree alone if it is alive.
+
 ## Reviewing with Codex
 
 `tools/review.sh` runs `codex exec --sandbox read-only -i <png>...` with a prompt naming the source file, so Codex reads the code and looks at the images together. Read-only is intentional: Codex critiques, Claude implements.
