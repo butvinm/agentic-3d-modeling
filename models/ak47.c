@@ -55,7 +55,7 @@ static void Reserve(Builder *b, int verts, int tris)
     }
 }
 
-static int Vert(Builder *b, Vector3 p, Vector3 n)
+static int Vert(Builder *b, Vector3 p, Vector3 n, Vector2 uv)
 {
     Reserve(b, 1, 0);
     int i = b->vertexCount++;
@@ -65,8 +65,8 @@ static int Vert(Builder *b, Vector3 p, Vector3 n)
     b->normals[i * 3 + 0] = n.x;
     b->normals[i * 3 + 1] = n.y;
     b->normals[i * 3 + 2] = n.z;
-    b->texcoords[i * 2 + 0] = 0.0f;
-    b->texcoords[i * 2 + 1] = 0.0f;
+    b->texcoords[i * 2 + 0] = uv.x;
+    b->texcoords[i * 2 + 1] = uv.y;
     return i;
 }
 
@@ -79,19 +79,42 @@ static void Tri(Builder *b, int a, int c, int d)
     b->indices[i * 3 + 2] = (unsigned short)d;
 }
 
+// ---------------------------------------------------------------------------
+// Texture coordinates
+//
+// Carried in millimetres and divided by the material's repeat length in GroupFinish, so one texture repeat covers a fixed physical distance wherever it lands and the same map serves a 6 mm pin and a 240 mm buttstock.
+// u runs along the part and v across it: for a flat face that is (z, y) or (z, x), for a tube the axial distance and the circumferential arc, for a swept section the path length and the section perimeter. Wood grain is drawn along u, so it follows the barrel axis on the handguards and the comb line on the stock.
+// The projection is chosen per face rather than per vertex: a dominant-axis rule evaluated at each vertex flips part way round a cylinder and seams every barrel.
+// ---------------------------------------------------------------------------
+
+static Vector2 PlanarUV(Vector3 p, Vector3 n)
+{
+    float ax = fabsf(n.x), ay = fabsf(n.y), az = fabsf(n.z);
+    if (az >= ax && az >= ay) return (Vector2){ p.x, p.y };
+    if (ay >= ax) return (Vector2){ p.z, p.x };
+    return (Vector2){ p.z, p.y };
+}
+
+static Vector2 PlaneUV(Vector3 p, Vector3 c, Vector3 ux, Vector3 uy, float uOff)
+{
+    Vector3 d = Vector3Subtract(p, c);
+    return (Vector2){ uOff + Vector3DotProduct(d, ux), Vector3DotProduct(d, uy) };
+}
+
 // Flat-shaded quad. Winding p0-p1-p2-p3 must be counter-clockwise seen from outside.
 static void Quad(Builder *b, Vector3 p0, Vector3 p1, Vector3 p2, Vector3 p3)
 {
     Vector3 n = Vector3Normalize(Vector3CrossProduct(Vector3Subtract(p1, p0), Vector3Subtract(p2, p0)));
-    int a = Vert(b, p0, n), c = Vert(b, p1, n), d = Vert(b, p2, n), e = Vert(b, p3, n);
+    int a = Vert(b, p0, n, PlanarUV(p0, n)), c = Vert(b, p1, n, PlanarUV(p1, n));
+    int d = Vert(b, p2, n, PlanarUV(p2, n)), e = Vert(b, p3, n, PlanarUV(p3, n));
     Tri(b, a, c, d);
     Tri(b, a, d, e);
 }
 
-static void QuadN(Builder *b, Vector3 p0, Vector3 p1, Vector3 p2, Vector3 p3,
-                  Vector3 n0, Vector3 n1, Vector3 n2, Vector3 n3)
+static void QuadUV(Builder *b, const Vector3 p[4], const Vector3 n[4], const Vector2 t[4])
 {
-    int a = Vert(b, p0, n0), c = Vert(b, p1, n1), d = Vert(b, p2, n2), e = Vert(b, p3, n3);
+    int a = Vert(b, p[0], n[0], t[0]), c = Vert(b, p[1], n[1], t[1]);
+    int d = Vert(b, p[2], n[2], t[2]), e = Vert(b, p[3], n[3], t[3]);
     Tri(b, a, c, d);
     Tri(b, a, d, e);
 }
@@ -175,6 +198,11 @@ static void Tube(Builder *bd, Vector3 a, Vector3 b, float r0, float r1, int side
 
     float slant = (r0 - r1) / len;
 
+    // Axial coordinate measured from the world origin along the tube's own axis, so segments butted end to end continue one pattern instead of each restarting it: the barrel is three tubes and would otherwise show a texture step at every junction.
+    float uA = Vector3DotProduct(a, dir);
+    float uB = uA + sqrtf(len * len + (r0 - r1) * (r0 - r1));
+    float rm = 0.5f * (r0 + r1);
+
     for (int j = 0; j < sides; j++) {
         float t0 = 2.0f * PI * (float)j / (float)sides;
         float t1 = 2.0f * PI * (float)(j + 1) / (float)sides;
@@ -183,34 +211,39 @@ static void Tube(Builder *bd, Vector3 a, Vector3 b, float r0, float r1, int side
         Vector3 n0 = Vector3Normalize(Vector3Add(d0, Vector3Scale(dir, slant)));
         Vector3 n1 = Vector3Normalize(Vector3Add(d1, Vector3Scale(dir, slant)));
 
-        QuadN(bd,
-              Vector3Add(a, Vector3Scale(d0, r0)), Vector3Add(a, Vector3Scale(d1, r0)),
-              Vector3Add(b, Vector3Scale(d1, r1)), Vector3Add(b, Vector3Scale(d0, r1)),
-              n0, n1, n1, n0);
+        Vector3 P[4] = {
+            Vector3Add(a, Vector3Scale(d0, r0)), Vector3Add(a, Vector3Scale(d1, r0)),
+            Vector3Add(b, Vector3Scale(d1, r1)), Vector3Add(b, Vector3Scale(d0, r1)),
+        };
+        Vector3 N[4] = { n0, n1, n1, n0 };
+        Vector2 T[4] = { { uA, rm * t0 }, { uA, rm * t1 }, { uB, rm * t1 }, { uB, rm * t0 } };
+        QuadUV(bd, P, N, T);
     }
 
     if (capA && r0 > 1e-6f) {
         Vector3 n = Vector3Negate(dir);
-        int centre = Vert(bd, a, n);
+        int centre = Vert(bd, a, n, PlaneUV(a, a, u, v, uA));
         for (int j = 0; j < sides; j++) {
             float t0 = 2.0f * PI * (float)j / (float)sides;
             float t1 = 2.0f * PI * (float)(j + 1) / (float)sides;
             Vector3 d0 = Vector3Add(Vector3Scale(u, cosf(t0)), Vector3Scale(v, sinf(t0)));
             Vector3 d1 = Vector3Add(Vector3Scale(u, cosf(t1)), Vector3Scale(v, sinf(t1)));
-            int p1 = Vert(bd, Vector3Add(a, Vector3Scale(d1, r0)), n);
-            int p0 = Vert(bd, Vector3Add(a, Vector3Scale(d0, r0)), n);
+            Vector3 q1 = Vector3Add(a, Vector3Scale(d1, r0)), q0 = Vector3Add(a, Vector3Scale(d0, r0));
+            int p1 = Vert(bd, q1, n, PlaneUV(q1, a, u, v, uA));
+            int p0 = Vert(bd, q0, n, PlaneUV(q0, a, u, v, uA));
             Tri(bd, centre, p1, p0);
         }
     }
     if (capB && r1 > 1e-6f) {
-        int centre = Vert(bd, b, dir);
+        int centre = Vert(bd, b, dir, PlaneUV(b, b, u, v, uB));
         for (int j = 0; j < sides; j++) {
             float t0 = 2.0f * PI * (float)j / (float)sides;
             float t1 = 2.0f * PI * (float)(j + 1) / (float)sides;
             Vector3 d0 = Vector3Add(Vector3Scale(u, cosf(t0)), Vector3Scale(v, sinf(t0)));
             Vector3 d1 = Vector3Add(Vector3Scale(u, cosf(t1)), Vector3Scale(v, sinf(t1)));
-            int p0 = Vert(bd, Vector3Add(b, Vector3Scale(d0, r1)), dir);
-            int p1 = Vert(bd, Vector3Add(b, Vector3Scale(d1, r1)), dir);
+            Vector3 q0 = Vector3Add(b, Vector3Scale(d0, r1)), q1 = Vector3Add(b, Vector3Scale(d1, r1));
+            int p0 = Vert(bd, q0, dir, PlaneUV(q0, b, u, v, uB));
+            int p1 = Vert(bd, q1, dir, PlaneUV(q1, b, u, v, uB));
             Tri(bd, centre, p0, p1);
         }
     }
@@ -290,10 +323,14 @@ static void Sweep(Builder *b, const Vector2 *sect, int n, const Frame *fr, int n
         sn[j] = Vector2Normalize((Vector2){ e0.y + e1.y, -e0.x - e1.x });
     }
 
+    // v is the perimeter walked in world space at each frame and u the distance travelled along the path, anchored at the first frame's z so a swept part and an abutting flat one carry the grain at the same rate.
     Vector3 p[SECT_MAX], q[SECT_MAX], np[SECT_MAX], nq[SECT_MAX];
+    float vp[SECT_MAX + 1], vq[SECT_MAX + 1];
+    float up = fr[0].c.z, uq = up;
     for (int i = 0; i < nf; i++) {
         Vector3 *pos = (i == 0) ? p : q;
         Vector3 *nrm = (i == 0) ? np : nq;
+        float *vs = (i == 0) ? vp : vq;
         float sx = Vector3Length(fr[i].ax), sy = Vector3Length(fr[i].ay);
         Vector3 ux = Vector3Scale(fr[i].ax, 1.0f / sx);
         Vector3 uy = Vector3Scale(fr[i].ay, 1.0f / sy);
@@ -302,34 +339,48 @@ static void Sweep(Builder *b, const Vector2 *sect, int n, const Frame *fr, int n
                                 Vector3Add(Vector3Scale(fr[i].ax, sect[j].x), Vector3Scale(fr[i].ay, sect[j].y)));
             nrm[j] = Vector3Normalize(Vector3Add(Vector3Scale(ux, sn[j].x / sx), Vector3Scale(uy, sn[j].y / sy)));
         }
+        vs[0] = 0.0f;
+        for (int j = 1; j <= n; j++) vs[j] = vs[j - 1] + Vector3Distance(pos[j % n], pos[j - 1]);
         if (i == 0) continue;
+        uq = up + Vector3Distance(fr[i].c, fr[i - 1].c);
         for (int j = 0; j < n; j++) {
             int k = (j + 1) % n;
-            QuadN(b, p[j], p[k], q[k], q[j], np[j], np[k], nq[k], nq[j]);
+            Vector3 P[4] = { p[j], p[k], q[k], q[j] };
+            Vector3 N[4] = { np[j], np[k], nq[k], nq[j] };
+            Vector2 T[4] = { { up, vp[j] }, { up, vp[j + 1] }, { uq, vq[j + 1] }, { uq, vq[j] } };
+            QuadUV(b, P, N, T);
         }
         for (int j = 0; j < n; j++) { p[j] = q[j]; np[j] = nq[j]; }
+        for (int j = 0; j <= n; j++) vp[j] = vq[j];
+        up = uq;
     }
 
     if (capA) {
         Vector3 nA = Vector3Normalize(Vector3Negate(Vector3CrossProduct(fr[0].ax, fr[0].ay)));
-        int centre = Vert(b, fr[0].c, nA);
+        Vector3 ux = Vector3Normalize(fr[0].ax), uy = Vector3Normalize(fr[0].ay);
+        float off = fr[0].c.z;
+        int centre = Vert(b, fr[0].c, nA, PlaneUV(fr[0].c, fr[0].c, ux, uy, off));
         for (int j = 0; j < n; j++) {
             int k = (j + 1) % n;
             Vector3 a = Vector3Add(fr[0].c, Vector3Add(Vector3Scale(fr[0].ax, sect[j].x), Vector3Scale(fr[0].ay, sect[j].y)));
             Vector3 c = Vector3Add(fr[0].c, Vector3Add(Vector3Scale(fr[0].ax, sect[k].x), Vector3Scale(fr[0].ay, sect[k].y)));
-            int ia = Vert(b, c, nA), ib = Vert(b, a, nA);
+            int ia = Vert(b, c, nA, PlaneUV(c, fr[0].c, ux, uy, off));
+            int ib = Vert(b, a, nA, PlaneUV(a, fr[0].c, ux, uy, off));
             Tri(b, centre, ia, ib);
         }
     }
     if (capB) {
         int last = nf - 1;
         Vector3 nB = Vector3Normalize(Vector3CrossProduct(fr[last].ax, fr[last].ay));
-        int centre = Vert(b, fr[last].c, nB);
+        Vector3 ux = Vector3Normalize(fr[last].ax), uy = Vector3Normalize(fr[last].ay);
+        float off = fr[last].c.z;
+        int centre = Vert(b, fr[last].c, nB, PlaneUV(fr[last].c, fr[last].c, ux, uy, off));
         for (int j = 0; j < n; j++) {
             int k = (j + 1) % n;
             Vector3 a = Vector3Add(fr[last].c, Vector3Add(Vector3Scale(fr[last].ax, sect[j].x), Vector3Scale(fr[last].ay, sect[j].y)));
             Vector3 c = Vector3Add(fr[last].c, Vector3Add(Vector3Scale(fr[last].ax, sect[k].x), Vector3Scale(fr[last].ay, sect[k].y)));
-            int ia = Vert(b, a, nB), ib = Vert(b, c, nB);
+            int ia = Vert(b, a, nB, PlaneUV(a, fr[last].c, ux, uy, off));
+            int ib = Vert(b, c, nB, PlaneUV(c, fr[last].c, ux, uy, off));
             Tri(b, centre, ia, ib);
         }
     }
@@ -371,12 +422,223 @@ typedef enum {
 } MatId;
 
 // lighting.fs gamma-corrects with pow(c, 1/2.2), so these read considerably lighter than the raw values once shaded.
+// Each entry is the material at its cleanest and brightest, not its average: the diffuse maps below are eight-bit and multiply the colour, so they can only ever subtract from it. The average surface is the colour times the map's mean, which is roughly 0.65 for wood, 0.60 for steel, 0.72 for grey and 0.38 for blued.
 static const Color MAT_COLOR[MAT_COUNT] = {
-    [MAT_WOOD]  = { 112,  44,  22, 255 },
+    [MAT_WOOD]  = { 138,  54,  27, 255 },
     [MAT_STEEL] = { 140, 144, 152, 255 },
-    [MAT_GREY]  = {  62,  65,  70, 255 },
-    [MAT_BLUED] = {  20,  21,  23, 255 },
+    [MAT_GREY]  = {  78,  80,  86, 255 },
+    [MAT_BLUED] = {  56,  56,  60, 255 },
 };
+
+// Millimetres covered by one texture repeat, along the part (u) and across it (v).
+// Wood is the anisotropic one, and the v figure is the number that matters: on a swept part v is the section perimeter, so the handguard's 130 mm girth wraps the map most of the way round. At 145 mm the 22 latewood lines the map carries land about 6.6 mm apart and about eighteen of them go round the handguard, which is what references/ak47/ref_02.jpg shows. An earlier 78 mm put nearly forty round it and the wood read as corrugation.
+static const Vector2 MAT_REPEAT[MAT_COUNT] = {
+    [MAT_WOOD]  = { 320.0f, 145.0f },
+    [MAT_STEEL] = { 165.0f,  95.0f },
+    [MAT_GREY]  = {  62.0f,  62.0f },
+    [MAT_BLUED] = { 128.0f,  96.0f },
+};
+
+// ---------------------------------------------------------------------------
+// Procedural surface maps
+//
+// lighting.fs:73 evaluates texelColor*(tint + specular)*lightDot, so a diffuse texture multiplies the material colour rather than replacing it. An eight-bit map cannot exceed 1.0, so it can only darken: every map here is written as a pure darkener with a mean well below 1.0, and MAT_COLOR carries the clean state each material darkens away from. Writing them centred on 1.0 instead is what a first pass did, and it saturated a third of the blued map to solid white, which expressed nothing at all.
+//
+// The noise is value noise on an integer lattice evaluated modulo its period, so every map tiles seamlessly. That is the whole reason it is written out here instead of calling GenImagePerlinNoise: stb's Perlin does not tile, and a barrel 318 mm long crosses two and a half repeats of the blued map.
+// ---------------------------------------------------------------------------
+
+#define TEX_SIZE 512
+
+static float Hash2(int x, int y, int seed)
+{
+    unsigned int h = (unsigned int)x * 374761393u + (unsigned int)y * 668265263u + (unsigned int)seed * 1442695041u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    return (float)((h ^ (h >> 16)) & 0xffffffu) / (float)0xffffffu;
+}
+
+static float Smoothstep01(float t) { return t * t * (3.0f - 2.0f * t); }
+
+// Bilinear value noise on a pu x pv lattice. Sampling u, v over [0,1) wraps exactly.
+static float Noise(float u, float v, int pu, int pv, int seed)
+{
+    float x = u * (float)pu, y = v * (float)pv;
+    int x0 = (int)floorf(x), y0 = (int)floorf(y);
+    float fx = Smoothstep01(x - (float)x0), fy = Smoothstep01(y - (float)y0);
+    int xa = ((x0 % pu) + pu) % pu, xb = (xa + 1) % pu;
+    int ya = ((y0 % pv) + pv) % pv, yb = (ya + 1) % pv;
+    float n00 = Hash2(xa, ya, seed), n10 = Hash2(xb, ya, seed);
+    float n01 = Hash2(xa, yb, seed), n11 = Hash2(xb, yb, seed);
+    return (n00 * (1.0f - fx) + n10 * fx) * (1.0f - fy) + (n01 * (1.0f - fx) + n11 * fx) * fy;
+}
+
+// Octaves double both periods, so each one still divides the map and the sum keeps tiling.
+// pu < pv stretches the features along u, which is how the grain lines and the machining marks are made directional.
+static float Fbm(float u, float v, int pu, int pv, int seed, int octaves)
+{
+    float sum = 0.0f, amp = 1.0f, norm = 0.0f;
+    for (int i = 0; i < octaves; i++) {
+        sum += amp * Noise(u, v, pu << i, pv << i, seed + i * 71);
+        norm += amp;
+        amp *= 0.5f;
+    }
+    return sum / norm;
+}
+
+static float Sstep(float e0, float e1, float x)
+{
+    return Smoothstep01(Clamp((x - e0) / (e1 - e0), 0.0f, 1.0f));
+}
+
+static unsigned char Chan(float v)
+{
+    int i = (int)(v * 255.0f + 0.5f);
+    return (unsigned char)((i < 0) ? 0 : (i > 255) ? 255 : i);
+}
+
+// Darkening a wood multiplier has to pull green and blue down faster than red, or the grain reads as soot on the surface instead of denser latewood underneath it.
+// The shift is measured from the map's mean rather than from 1.0, so only wood darker than average turns redder and the palest earlywood keeps the authored hue.
+#define WOOD_MEAN 0.66f
+
+static Color WoodPixel(float m)
+{
+    float d = WOOD_MEAN - m;
+    return (Color){ Chan(m), Chan(m * (1.0f - 0.55f * d)), Chan(m * (1.0f - 0.95f * d)), 255 };
+}
+
+// Beech stock and handguards: long latewood lines running along u, broad tonal blotches, and the occasional near-black mineral streak that both ref_01 and ref_05 show on the butt.
+static Image WoodImage(void)
+{
+    Image img = GenImageColor(TEX_SIZE, TEX_SIZE, WHITE);
+    Color *px = (Color *)img.data;
+    for (int y = 0; y < TEX_SIZE; y++) {
+        float v = (float)y / (float)TEX_SIZE;
+        for (int x = 0; x < TEX_SIZE; x++) {
+            float u = (float)x / (float)TEX_SIZE;
+
+            // Evenly spaced bands read as corduroy, so the band coordinate is warped: a slow term across v that stretches and compresses the spacing, and a faster one that makes each line wander along its length. The warp is deliberately small next to the 22 bands, because a large one merges them into a handful of wide swirls that read as cartoon woodgrain.
+            // What matters more than either is that no line survives the whole length. A band that runs unbroken from wrist to buttplate makes the stock read as plywood or a contour map however faint it is, so `present` gates each line on a noise field that varies along u and barely at all across v: whole lines fade out together over stretches, and broad tone rather than banding carries most of the variation.
+            float warp = 1.4f * Fbm(u, v, 1, 2, 71, 2) + 1.0f * Fbm(u, v, 3, 6, 5, 4) + 0.5f * Fbm(u, v, 2, 2, 23, 3);
+            float band = 0.5f - 0.5f * cosf(2.0f * PI * (v * 22.0f + warp));
+            float b2 = band * band, b4 = b2 * b2;
+            float present = Sstep(0.30f, 0.70f, Fbm(u, v, 6, 2, 83, 4));
+            float line = b4 * b4 * present;
+
+            float fibre = Fbm(u, v, 2, 20, 31, 5);
+            float blotch = Fbm(u, v, 2, 2, 47, 4);
+            float streak = Fbm(u, v, 1, 6, 91, 4);
+            float mineral = Sstep(0.66f, 0.88f, Fbm(u, v, 1, 12, 59, 4));
+
+            float m = 0.70f
+                    - 0.17f * line
+                    - 0.12f * (fibre - 0.5f)
+                    - 0.38f * (blotch - 0.5f)
+                    - 0.16f * (streak - 0.5f)
+                    - 0.34f * mineral;
+            px[y * TEX_SIZE + x] = WoodPixel(m);
+        }
+    }
+    return img;
+}
+
+// Milled receiver: draw-marks along the length, a broad polish sweep on the high spots and a cooler patina in the hollows.
+// ref_01 shows this as worn bright steel, not as a black finish.
+static Image SteelImage(void)
+{
+    Image img = GenImageColor(TEX_SIZE, TEX_SIZE, WHITE);
+    Color *px = (Color *)img.data;
+    for (int y = 0; y < TEX_SIZE; y++) {
+        float v = (float)y / (float)TEX_SIZE;
+        for (int x = 0; x < TEX_SIZE; x++) {
+            float u = (float)x / (float)TEX_SIZE;
+
+            float mill = Fbm(u, v, 2, 40, 307, 4);
+            float sweep = Fbm(u, v, 3, 10, 311, 4);
+            float patina = Fbm(u, v, 2, 2, 313, 4);
+            float speck = Sstep(0.76f, 0.94f, Fbm(u, v, 12, 12, 317, 3));
+
+            float m = 0.55f
+                    + 0.16f * (mill - 0.5f)
+                    + 0.40f * (sweep - 0.5f)
+                    - 0.32f * (patina - 0.5f)
+                    - 0.34f * speck;
+            float warm = 0.09f * (patina - 0.5f);
+            px[y * TEX_SIZE + x] = (Color){ Chan(m + warm), Chan(m), Chan(m - warm * 0.6f), 255 };
+        }
+    }
+    return img;
+}
+
+// Phosphated small parts: fine granular tooth, matte, very little large-scale variation.
+static Image GreyImage(void)
+{
+    Image img = GenImageColor(TEX_SIZE, TEX_SIZE, WHITE);
+    Color *px = (Color *)img.data;
+    for (int y = 0; y < TEX_SIZE; y++) {
+        float v = (float)y / (float)TEX_SIZE;
+        for (int x = 0; x < TEX_SIZE; x++) {
+            float u = (float)x / (float)TEX_SIZE;
+
+            float tooth = Fbm(u, v, 24, 24, 211, 4);
+            float blotch = Fbm(u, v, 3, 3, 223, 4);
+            float rub = Sstep(0.70f, 0.94f, Fbm(u, v, 4, 8, 227, 4));
+
+            float m = 0.72f + 0.22f * (tooth - 0.5f) + 0.18f * (blotch - 0.5f) + 0.20f * rub;
+            px[y * TEX_SIZE + x] = (Color){ Chan(m), Chan(m), Chan(m), 255 };
+        }
+    }
+    return img;
+}
+
+// Blued barrel and magazine: a smooth dark finish with faint polishing streaks, plus the plum-brown thinning along the high spots that ref_01 and ref_02 both show on the magazine ribs.
+static Image BluedImage(void)
+{
+    Image img = GenImageColor(TEX_SIZE, TEX_SIZE, WHITE);
+    Color *px = (Color *)img.data;
+    for (int y = 0; y < TEX_SIZE; y++) {
+        float v = (float)y / (float)TEX_SIZE;
+        for (int x = 0; x < TEX_SIZE; x++) {
+            float u = (float)x / (float)TEX_SIZE;
+
+            // This is the widest map of the four: the finish itself is very dark but the spots it has worn through are bare steel, so the darkener has to span nearly its whole range for the two to read as different surfaces at all.
+            float polish = Fbm(u, v, 2, 24, 101, 5);
+            float cloud = Fbm(u, v, 3, 3, 113, 4);
+            float thin = Sstep(0.52f, 0.88f, Fbm(u, v, 3, 7, 127, 4));
+
+            float m = 0.30f + 0.10f * (polish - 0.5f) + 0.17f * (cloud - 0.5f) + 0.62f * thin;
+            px[y * TEX_SIZE + x] = (Color){ Chan(m), Chan(m * (1.0f - 0.11f * thin)), Chan(m * (1.0f - 0.30f * thin)), 255 };
+        }
+    }
+    return img;
+}
+
+static Texture2D gTex[MAT_COUNT];
+static bool gTexReady;
+
+static void BuildTextures(void)
+{
+    Image img[MAT_COUNT];
+    img[MAT_WOOD] = WoodImage();
+    img[MAT_STEEL] = SteelImage();
+    img[MAT_GREY] = GreyImage();
+    img[MAT_BLUED] = BluedImage();
+
+    for (int m = 0; m < MAT_COUNT; m++) {
+        gTex[m] = LoadTextureFromImage(img[m]);
+        GenTextureMipmaps(&gTex[m]);
+        SetTextureFilter(gTex[m], TEXTURE_FILTER_TRILINEAR);
+        SetTextureWrap(gTex[m], TEXTURE_WRAP_REPEAT);
+        UnloadImage(img[m]);
+    }
+    gTexReady = true;
+}
+
+// UnloadModel frees a material's map array but deliberately leaves its textures alone (vendor/raylib/src/rmodels.c:1199), so one texture per material is shared across all seven groups and released here.
+static void UnloadTextures(void)
+{
+    if (!gTexReady) return;
+    for (int m = 0; m < MAT_COUNT; m++) UnloadTexture(gTex[m]);
+    gTexReady = false;
+}
 
 typedef struct {
     Builder b[MAT_COUNT];
@@ -415,6 +677,12 @@ static void GroupFinish(Group *g, const char *name)
                      name, m, b->vertexCount);
         }
 
+        // Vert() left the texture coordinates in millimetres; one repeat is a fixed physical size, so this is where a material's tiling rate is applied.
+        for (int i = 0; i < b->vertexCount; i++) {
+            b->texcoords[i * 2 + 0] /= MAT_REPEAT[m].x;
+            b->texcoords[i * 2 + 1] /= MAT_REPEAT[m].y;
+        }
+
         Mesh mesh = { 0 };
         mesh.vertexCount = b->vertexCount;
         mesh.triangleCount = b->triangleCount;
@@ -426,6 +694,7 @@ static void GroupFinish(Group *g, const char *name)
 
         g->model[m] = LoadModelFromMesh(mesh);
         g->model[m].materials[0].maps[MATERIAL_MAP_DIFFUSE].color = MAT_COLOR[m];
+        if (gTexReady) g->model[m].materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = gTex[m];
         HarnessApplyLighting(&g->model[m]);
         g->has[m] = true;
 
@@ -877,6 +1146,8 @@ static void BuildStock(void)
 
 static void Init(void)
 {
+    BuildTextures();
+
     BuildSight();
     BuildBarrel();
     BuildWood();
@@ -903,6 +1174,7 @@ static void Unload(void)
     GroupUnload(&gMag);
     GroupUnload(&gFire);
     GroupUnload(&gStock);
+    UnloadTextures();
 }
 
 static void DrawSight(void) { GroupDraw(&gSight); }
@@ -951,8 +1223,14 @@ const Scene SCENE = {
         "fire_control: trigger guard bow 6.2 deep and 16 wide, swept through six frames so it follows the measured sag from y 135.8 at z 510 to 132.3 at 550 as one continuous contour rather than running as a straight bar, its two webs, trigger, magazine catch, wooden pistol grip swept along an axis raked 17 degrees with a palm swell at the heel.\n"
         "stock: wrist ferrule tapering into the wood, wooden butt swept through seventeen flat-cheeked sections so the comb rise at z 720 to 736 comes out as a curve rather than a step, the last section plane tilted onto the raked butt face so the rake is in the wood and not just the buttplate; left-side sling swivel loop.\n"
         "\n"
+        "Surfaces carry procedural diffuse maps, four 512x512 images generated at init and shared by all seven parts: wood, milled steel, phosphate grey and blued.\n"
+        "lighting.fs multiplies the map by the material colour and an eight-bit map cannot exceed 1.0, so each map is a pure darkener and MAT_COLOR is now the clean bright state of the material rather than its average; mean map values are about 0.65 wood, 0.60 steel, 0.72 grey and 0.38 blued.\n"
+        "wood: 22 warped latewood lines per repeat, each gated by a noise field that varies along the grain so no line survives the whole length of a part, over broad tonal blotches, longitudinal figure and occasional near-black mineral streaks; broad tone carries most of the variation and the banding only a sixth of it, and darker wood is shifted redder, since latewood is denser rather than sooty. milled steel: draw marks along the length, a polish sweep on the high spots, cooler patina in the hollows and dark pitting. grey: fine granular phosphate tooth. blued: the widest map of the four, a dark finish worn through to warm bare steel over roughly a tenth of its area.\n"
+        "Texture coordinates are in millimetres and divided by a per-material repeat length, so one repeat is a fixed physical size on every part: 320 by 145 for wood, 165 by 95 steel, 62 square grey, 128 by 96 blued. u runs along the part and v across it, so wood grain follows the barrel axis on the handguards and the comb line on the stock. Flat faces project planar by dominant face normal, tubes map axially and circumferentially with the axial coordinate taken from the world origin so the three barrel segments continue one pattern, and swept sections map by path length and section perimeter. Noise is periodic value noise so every map tiles.\n"
+        "\n"
         "Widths are the weakest numbers here: no plan or front elevation was found, so only the receiver is measured (34.4 across, from the assembled rear receiver view in references/ak47/ref_06.jpg). Handguard 42, magazine 28, grip 31, and a buttstock tapering from 27 at the wrist to 40 at the butt, are all inferred from the receiver and should be treated as the least trustworthy dimensions in the model.\n"
         "Known simplifications, all repeatedly flagged in renders/ak47/v*/critique.md and all consequences of building from hexahedra and swept sections: the magazine ribs are swept strips standing 0.3 proud that fade out at both ends rather than true pressings; the gas block, front sight base and handguard band are chamfered prisms rather than forgings flowing into rounded barrel collars; and the receiver flanks are flat plates with milled pockets rather than a body that changes section along its length.\n"
+        "The texturing is diffuse only: there is no normal or specular map, so grain, pitting and machining marks change colour but never catch the light, and every surface stays as smooth as its mesh. Sweep and tube end caps project side grain rather than end grain, which is wrong on the muzzle face and on the butt under the buttplate but nowhere else visible.\n"
         "The magazine ribs were queried in all four rounds as looking additive; references/ak47/ref_01.png shows the AK-47 steel magazine carrying raised longitudinal pressings, not recessed channels, so they stay raised and were only reduced in projection.",
     .init = Init,
     .unload = Unload,
