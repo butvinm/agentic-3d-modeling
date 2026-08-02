@@ -29,12 +29,12 @@ static void SetupLighting(void)
     lighting = LoadShader(RAYLIB_SHADER_DIR "/lighting.vs", RAYLIB_SHADER_DIR "/lighting.fs");
     lighting.locs[SHADER_LOC_VECTOR_VIEW] = GetShaderLocation(lighting, "viewPos");
 
-    float ambient[4] = { 0.20f, 0.21f, 0.24f, 1.0f };
+    float ambient[4] = { 0.38f, 0.39f, 0.44f, 1.0f };
     SetShaderValue(lighting, GetShaderLocation(lighting, "ambient"), ambient, SHADER_UNIFORM_VEC4);
 
     CreateLight(LIGHT_POINT, (Vector3){ 8.0f, 10.0f, 8.0f }, Vector3Zero(), (Color){ 255, 246, 224, 255 }, lighting);
-    CreateLight(LIGHT_POINT, (Vector3){ -9.0f, 5.0f, -7.0f }, Vector3Zero(), (Color){ 120, 150, 255, 255 }, lighting);
-    CreateLight(LIGHT_POINT, (Vector3){ 0.0f, -8.0f, 4.0f }, Vector3Zero(), (Color){ 60, 60, 80, 255 }, lighting);
+    CreateLight(LIGHT_POINT, (Vector3){ -9.0f, 5.0f, -7.0f }, Vector3Zero(), (Color){ 150, 178, 255, 255 }, lighting);
+    CreateLight(LIGHT_POINT, (Vector3){ 0.0f, -9.0f, 5.0f }, Vector3Zero(), (Color){ 135, 130, 150, 255 }, lighting);
 }
 
 static float OrbitRadius(void) { return (SCENE.orbitRadius > 0.0f) ? SCENE.orbitRadius : 8.0f; }
