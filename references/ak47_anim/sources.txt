@@ -1,0 +1,6 @@
+ref_01.jpg	https://upload.wikimedia.org/wikipedia/commons/f/fc/AK-Bolt-Carrier-Bolt-and-Gas_piston.jpg
+ref_02.jpg	https://upload.wikimedia.org/wikipedia/commons/2/23/TAPCO_G2_AK-47_Trigger_Group_%26_AK_Hammer.jpg
+ref_03.jpg	https://upload.wikimedia.org/wikipedia/commons/3/30/AK-47_Disassembled.JPG
+ref_04.png	https://upload.wikimedia.org/wikipedia/commons/6/65/AK-47_type_II_noBG.png
+ref_05.jpg	https://upload.wikimedia.org/wikipedia/commons/5/57/AK-47_type_II_Part_DM-ST-89-01131.jpg
+ref_06.jpg	https://upload.wikimedia.org/wikipedia/commons/a/a0/AK47_Receiver.jpg
