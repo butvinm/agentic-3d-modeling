@@ -481,7 +481,7 @@ static void BuildRunningGear(Builder *dark, Builder *metal)
 
     for (int a = 0; a < 2; a++) {
         float x = (a == 0) ? -AXLE_X : AXLE_X;
-        PushRevolveZ(metal, (Vector3){ x, AXLE_Y, 0.0f }, axleZ, axleR, 2, 16);
+        PushRevolveZ(metal, (Vector3){ x, AXLE_Y, 0.0f }, axleZ, axleR, 2, WHEEL_SEGS);
 
         for (int s = 0; s < 2; s++) {
             float z = (s == 0) ? -WHEEL_Z : WHEEL_Z;
@@ -680,8 +680,9 @@ const Scene SCENE = {
         "running_gear), each emitting into up to six shared material meshes (body, dark,\n"
         "metal, glass, lamp, tail) carrying procedural grain textures.\n"
         "Hull is a swept slab whose underside lifts into wheel arches at AXLE_X = 1.65.\n"
-        "Wheels are 0.458-radius revolved tires on 0.215 rims, 16 tread lugs each,\n"
-        "with the lug base at 0.388 embedded 0.024 into the 0.412 tire profile.",
+        "Wheels are 0.458-radius revolved tires on 0.215 rims, 16 tread lugs each.\n"
+        "The lug base sits at radius 0.388 against a crowned tire profile, so it is\n"
+        "embedded 0.024 at the lug's side edges and up to 0.070 across the crown.",
     .init = Init,
     .draw = Draw,
     .unload = Unload,
