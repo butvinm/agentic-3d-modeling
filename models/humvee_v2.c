@@ -524,6 +524,12 @@ static void BuildHull(void)
 // front: engine bay, hood, front fenders, grille, lights and bumper
 // ---------------------------------------------------------------------------
 
+// Height of the hood's top skin at a given z. The slab is laid between two heights over its length, so anything sitting on it has to ask rather than assume a flat surface.
+static float HoodTopY(float z)
+{
+    return Lerp(HOOD_TOP_Y0, HOOD_TOP_Y1, (z - 0.740f) / (2.200f - 0.740f));
+}
+
 static void BuildFront(void)
 {
     Group *g = &gFront;
@@ -541,6 +547,23 @@ static void BuildFront(void)
     Prism(body, -0.660f, 0.660f, 0.740f, 2.200f,
           Lerp(HOOD_BASE_Y0, HOOD_BASE_Y1, 0.013f), Lerp(HOOD_BASE_Y0, HOOD_BASE_Y1, 0.987f),
           Lerp(HOOD_TOP_Y0, HOOD_TOP_Y1, 0.013f), Lerp(HOOD_TOP_Y0, HOOD_TOP_Y1, 0.987f));
+
+    // Hood air intake: a louvred panel with a raised bezel and eight ribs, leaving nine fore-aft slots.
+    // Proportioned off references/humvee_v2/ref_09.jpg, a plan view of the hood, and checked head-on against ref_03.jpg: it spans a little over 40 per cent of the hood's width and sits in its forward half.
+    // Codex called the flat hood out in three separate rounds before this went in.
+    {
+        const float pz0 = 1.280f, pz1 = 1.860f, phw = 0.275f;
+        float sy0 = HoodTopY(pz0), sy1 = HoodTopY(pz1);
+        Prism(dark, -phw, phw, pz0, pz1, sy0, sy1, sy0 + 0.004f, sy1 + 0.004f);
+        for (int i = 0; i < 8; i++) {
+            float cx = -phw + 2.0f * phw * (float)(i + 1) / 9.0f;
+            Prism(body, cx - 0.013f, cx + 0.013f, pz0, pz1, sy0, sy1, sy0 + 0.012f, sy1 + 0.012f);
+        }
+        Prism(body, -phw - 0.022f, -phw, pz0, pz1, sy0, sy1, sy0 + 0.014f, sy1 + 0.014f);
+        Prism(body, phw, phw + 0.022f, pz0, pz1, sy0, sy1, sy0 + 0.014f, sy1 + 0.014f);
+        Prism(body, -phw - 0.022f, phw + 0.022f, pz0 - 0.022f, pz0, sy0, sy0, sy0 + 0.014f, sy0 + 0.014f);
+        Prism(body, -phw - 0.022f, phw + 0.022f, pz1, pz1 + 0.022f, sy1, sy1, sy1 + 0.014f, sy1 + 0.014f);
+    }
 
     // Grille surround and slats.
     Box(body, -WELL_IN, -0.600f, SILL_Y, HOOD_BASE_Y1, 2.160f, NOSE_Z);
@@ -560,9 +583,10 @@ static void BuildFront(void)
     ArchedPanel(body, CORE_HW, WELL_IN, HOOD_BACK_Z, 2.160f, AXLE_F, SILL_Y, HOOD_BASE_Y0, bayEnd);
 
     // Headlight assembly, standing proud of the fender face so it is not swallowed by it.
-    Box(dark, 0.672f, 0.888f, 0.760f, 1.000f, 2.200f, 2.250f);
-    Tube(lamp, (Vector3){ 0.780f, 0.910f, 2.244f }, (Vector3){ 0.780f, 0.910f, 2.264f }, 0.072f, 0.072f, 20, false, true);
-    Tube(lamp, (Vector3){ 0.780f, 0.797f, 2.244f }, (Vector3){ 0.780f, 0.797f, 2.256f }, 0.031f, 0.031f, 14, false, true);
+    // The main lamp is 0.178 across: measured off references/humvee_v2/ref_03.jpg, where it spans 110 px against the 1310 px that carry the vehicle's 2.16 of width. It was 0.144, which Codex read as a domestic-car lamp cluster.
+    Box(dark, 0.664f, 0.896f, 0.706f, 1.036f, 2.200f, 2.250f);
+    Tube(lamp, (Vector3){ 0.780f, 0.925f, 2.244f }, (Vector3){ 0.780f, 0.925f, 2.264f }, 0.089f, 0.089f, 24, false, true);
+    Tube(lamp, (Vector3){ 0.780f, 0.771f, 2.244f }, (Vector3){ 0.780f, 0.771f, 2.256f }, 0.037f, 0.037f, 16, false, true);
     // Marker light at the outboard corner of the front panel.
     Box(lamp, 0.940f, 1.060f, 0.980f, 1.070f, 2.210f, 2.246f);
 
