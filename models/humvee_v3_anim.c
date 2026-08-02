@@ -1902,13 +1902,19 @@ static Pose PoseFor(float t)
 // Dust that behaved honestly would still be hanging there at the end of the cycle, and a repeating loop would silt up with it. Each puff therefore fades to nothing inside its life, which is a concession to looping and not a claim about dust.
 // ---------------------------------------------------------------------------
 
-#define DUST_PER_WHEEL 110
+// Two tiers, because one does not describe what a tyre does to dry ground.
+// The spray is what the tread throws directly: small, dense, short-lived, and still next to the wheel when it dies. The plume is what the wake then carries away: larger, fainter, longer-lived, and metres behind the truck by the end.
+// One tier of the average of the two reads as ground fog, which is what renders/humvee_v3_anim/v3/critique.md called this before the split.
+#define DUST_SPRAY     52       // per wheel
+#define DUST_PLUME     64       // per wheel
+#define DUST_PER_WHEEL (DUST_SPRAY + DUST_PLUME)
 #define DUST_COUNT     (CORNERS * DUST_PER_WHEEL)
-#define DUST_LIFE      0.85f    // seconds a puff lasts; shorter than the cycle, so nothing survives the seam
+#define DUST_MAX_LIFE  0.90f    // the longest any puff lasts; shorter than the cycle, so nothing survives the seam
 #define DUST_DRAG      0.52f    // seconds for a puff to shed its speed relative to the truck
 
 typedef struct {
     float born;        // phase of the cycle at which it leaves the contact patch
+    float life;        // seconds it lasts
     Vector3 offset;    // where on the patch, in the body's frame
     Vector3 drift;     // metres per second, in the body's frame, before drag
     float r0, grow;    // metres, and metres per second
@@ -1940,34 +1946,53 @@ static void MakeDust(void)
         for (int j = 0; j < DUST_PER_WHEEL; j++) {
             int i = c * DUST_PER_WHEEL + j;
             DustSpec *s = &gDustSpec[i];
+            bool spray = j < DUST_SPRAY;
+            int n = spray ? DUST_SPRAY : DUST_PLUME;
+            int k = spray ? j : j - DUST_SPRAY;
 
-            // Births evenly spread over the loop, jittered, so the plume is a stream rather than a pulse.
-            s->born = CYCLE * ((float)j + 0.65f * DustRand(i, 1)) / (float)DUST_PER_WHEEL;
+            // Births evenly spread over the loop within each tier, jittered, so both are streams rather than pulses.
+            s->born = CYCLE * ((float)k + 0.65f * DustRand(i, 1)) / (float)n;
 
-            // Off the contact patch: spread across the tyre's width and a little behind it, since dust is thrown from where the tread leaves the ground.
-            s->offset = (Vector3){ (DustRand(i, 2) - 0.5f) * 2.0f * TIRE_HW,
-                                   0.02f + 0.10f * DustRand(i, 3),
-                                   -0.10f - 0.30f * DustRand(i, 4) };
-
-            // Backwards into the wake, outboard away from the truck's flank, and up.
-            float big = DustRand(i, 5) * DustRand(i, 6);
-            s->drift = (Vector3){ side * (0.55f + 1.30f * DustRand(i, 7)),
-                                  1.05f + 1.90f * DustRand(i, 8),
-                                  -(3.30f + 2.60f * DustRand(i, 9)) };
             // A wide size spread on purpose. Puffs within a narrow band read as a row of repeated shells however many there are, because each contributes a silhouette of about the same radius.
-            s->r0 = 0.080f + 0.130f * big;
-            s->grow = 0.62f + 1.55f * big;
+            float big = DustRand(i, 5) * DustRand(i, 6);
+
+            if (spray) {
+                // Thrown off the tread itself: right at the patch, barely moving relative to the truck, and gone before it can drift anywhere.
+                s->life = 0.20f + 0.16f * DustRand(i, 15);
+                s->offset = (Vector3){ (DustRand(i, 2) - 0.5f) * 2.0f * TIRE_HW,
+                                       0.01f + 0.05f * DustRand(i, 3),
+                                       -0.04f - 0.14f * DustRand(i, 4) };
+                s->drift = (Vector3){ side * (0.25f + 0.70f * DustRand(i, 7)),
+                                      0.45f + 0.95f * DustRand(i, 8),
+                                      -(0.90f + 1.60f * DustRand(i, 9)) };
+                s->r0 = 0.030f + 0.055f * big;
+                s->grow = 0.20f + 0.42f * big;
+                s->peak = (rear ? 0.330f : 0.230f) * (0.70f + 0.55f * DustRand(i, 14));
+            } else {
+                // Handed to the wake: further back, larger, fainter, and still there a metre or two behind the tailgate.
+                s->life = 0.62f + 0.28f * DustRand(i, 15);
+                s->offset = (Vector3){ (DustRand(i, 2) - 0.5f) * 2.0f * TIRE_HW,
+                                       0.03f + 0.12f * DustRand(i, 3),
+                                       -0.12f - 0.32f * DustRand(i, 4) };
+                s->drift = (Vector3){ side * (0.55f + 1.30f * DustRand(i, 7)),
+                                      1.05f + 1.90f * DustRand(i, 8),
+                                      -(3.30f + 2.60f * DustRand(i, 9)) };
+                s->r0 = 0.070f + 0.110f * big;
+                s->grow = 0.50f + 1.25f * big;
+                s->peak = (rear ? 0.185f : 0.115f) * (0.70f + 0.55f * DustRand(i, 14));
+            }
+
             s->shape = (Vector3){ 0.80f + 0.45f * DustRand(i, 10),
                                   0.62f + 0.30f * DustRand(i, 11),
                                   0.80f + 0.45f * DustRand(i, 12) };
             s->yaw = DustRand(i, 13) * 2.0f * PI;
-            // The rear wheels run in ground the front pair has already broken up, and throw the heavier plume for it.
-            s->peak = (rear ? 0.260f : 0.165f) * (0.70f + 0.55f * DustRand(i, 14));
 
-            // No contact patch, no dust. Loading the tyre harder throws more of it, which is what makes the landing a burst and the jump a gap.
+            // How hard the tyre is pressed into the ground decides how much it throws, and that falls to nothing well before the tyre actually leaves it.
+            // A gate on contact alone gives a 0.20 s hole in the emission, which 0.85 s puffs then fill in: v3's critique could not read the jump's gap at all. Scaling by load instead widens the hole to the whole unloading and reloading, which is also what a tyre does.
             Pose birth = PoseFor(s->born);
-            s->emits = birth.clear[c] <= 0.002f;
-            s->load = 0.42f + 0.58f * Clamp(birth.travel[c] / SUSP_UP, 0.0f, 1.0f);
+            float seat = (birth.travel[c] + SUSP_DOWN) / (SUSP_UP + SUSP_DOWN);
+            s->load = Clamp((seat - 0.14f) / 0.52f, 0.0f, 1.0f);
+            s->emits = birth.clear[c] <= 0.002f && s->load > 0.001f;
             s->from = Vector3Add(birth.patch[c], (Vector3){ side * s->offset.x, s->offset.y, s->offset.z });
         }
     }
@@ -2023,12 +2048,12 @@ static void PoseDust(float t)
         const DustSpec *s = &gDustSpec[i];
         if (!s->emits) { gDustA[i] = 0.0f; continue; }
         float age = LoopWrap(t - s->born, CYCLE);
-        if (age > DUST_LIFE) { gDustA[i] = 0.0f; continue; }
+        if (age > s->life) { gDustA[i] = 0.0f; continue; }
 
         float carried = DUST_DRAG * (1.0f - expf(-age / DUST_DRAG));
         Vector3 at = Vector3Add(s->from, Vector3Scale(s->drift, carried));
         // Dust settles as it slows, so the vertical component is bled back off over the second half of a puff's life.
-        at.y -= 0.55f * s->drift.y * carried * (age / DUST_LIFE) * (age / DUST_LIFE);
+        at.y -= 0.55f * s->drift.y * carried * (age / s->life) * (age / s->life);
         if (at.y < 0.03f) at.y = 0.03f;
 
         float r = s->r0 + s->grow * age;
@@ -2037,7 +2062,7 @@ static void PoseDust(float t)
             MatrixTranslate(at.x, at.y, at.z));
 
         // In fast, out slowly, and all the way out before the life is up.
-        float fade = Clamp(age / 0.05f, 0.0f, 1.0f) * (1.0f - age / DUST_LIFE) * (1.0f - age / DUST_LIFE);
+        float fade = Clamp(age / 0.05f, 0.0f, 1.0f) * (1.0f - age / s->life) * (1.0f - age / s->life);
         gDustA[i] = s->peak * s->load * fade;
     }
 }
@@ -2459,8 +2484,12 @@ const Scene SCENE = {
         "tyre ever passes through the grid plane; where full droop will not reach, the\n"
         "truck is genuinely off the ground. Both are measured at build time and logged.\n"
         "\n"
-        "Dust: 440 puffs, 110 per wheel, born evenly across the loop from that wheel's\n"
-        "contact patch and living 0.85 s. One lumpy blob mesh of unit radius, drawn per\n"
+        "Dust: 464 puffs, 116 per wheel, born evenly across the loop from that wheel's\n"
+        "contact patch, in two tiers. The spray is what the tread throws directly --\n"
+        "small, dense, living 0.20 to 0.36 s and still beside the wheel when it dies.\n"
+        "The plume is what the wake carries away -- larger, fainter, living 0.62 to\n"
+        "0.90 s and metres behind the truck by the end. One tier averaging the two\n"
+        "reads as ground fog. One lumpy blob mesh of unit radius, drawn per\n"
         "puff with a scale, a yaw and a translation; it is only yawed, because a puff\n"
         "is shaded by a hemisphere ramp off its own normal and tumbling it would light\n"
         "some undersides from above. A puff is thrown backwards, outboard and up, and\n"
@@ -2470,10 +2499,12 @@ const Scene SCENE = {
         "slowly than the 6.64 m/s the road does. Each puff fades to nothing inside its\n"
         "life, which is a concession to the loop rather than a claim about dust.\n"
         "\n"
-        "Emission is gated on contact. A wheel that has left the ground throws nothing,\n"
-        "so the jump tears a real gap in the plume, and a tyre pressed harder into the\n"
-        "ground throws more, so the landing is a burst. 40 of the 440 puffs are gated\n"
-        "off by that, and at most 78 are alive at once.\n"
+        "Emission is gated on how hard the tyre is seated, which falls to nothing well\n"
+        "before the tyre actually leaves the ground and returns as it lands. Gating on\n"
+        "contact alone leaves a 0.20 s hole that longer-lived puffs simply fill in, so\n"
+        "the jump had no readable gap; gating on load widens the hole to the whole\n"
+        "unloading and reloading, which is also what a tyre does. 101 of the 464 puffs\n"
+        "are gated off by it, and at most 53 are alive at once.\n"
         "\n"
         "The soft edge is a second small shader. A closed blob has a hard silhouette at\n"
         "any subdivision, and piling up faint ones hides that in the middle of a plume\n"
