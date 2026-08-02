@@ -1,0 +1,4 @@
+build/
+renders/
+*.o
+*.a
