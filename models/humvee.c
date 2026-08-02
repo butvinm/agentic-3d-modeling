@@ -22,6 +22,11 @@
 #define WELL_Z          0.60f
 #define BED_RAIL_Y      1.72f
 
+#define TIRE_R_AT_LUG   0.412f
+#define TREAD_INNER     0.388f
+#define TREAD_OUTER     0.470f
+#define TREAD_Z         0.140f
+
 #define WHEEL_SEGS      32
 #define ARCH_SAMPLES    64
 #define MAX_PROFILE     160
@@ -402,7 +407,8 @@ static void BuildRear(Builder *dark, Builder *tail)
         PushBox(tail, (Vector3){ REAR_X - 0.015f, 1.08f, sign*0.86f }, (Vector3){ 0.04f, 0.20f, 0.20f });
     }
 
-    PushBox(dark, (Vector3){ REAR_X + 0.12f, 1.90f, 1.03f }, (Vector3){ 0.035f, 1.24f, 0.035f });
+    PushBox(dark, (Vector3){ REAR_X + 0.12f, 1.68f, 1.08f }, (Vector3){ 0.075f, 0.11f, 0.13f });
+    PushBox(dark, (Vector3){ REAR_X + 0.12f, 2.10f, 1.115f }, (Vector3){ 0.035f, 0.84f, 0.035f });
 
     PushBox(dark, (Vector3){ REAR_X - 0.006f, 1.30f, 0.0f }, (Vector3){ 0.012f, 0.022f, 1.96f });
     PushBox(dark, (Vector3){ REAR_X - 0.006f, 1.70f, 0.0f }, (Vector3){ 0.012f, 0.022f, 1.96f });
@@ -481,7 +487,7 @@ static void BuildRunningGear(Builder *dark, Builder *metal)
             float z = (s == 0) ? -WHEEL_Z : WHEEL_Z;
             PushRevolveZ(dark, (Vector3){ x, AXLE_Y, z }, tireZ, tireR, 10, WHEEL_SEGS);
             PushRevolveZ(metal, (Vector3){ x, AXLE_Y, z }, rimZ, rimR, 8, WHEEL_SEGS);
-            PushTread(dark, (Vector3){ x, AXLE_Y, z }, 16, 0.410f, AXLE_Y, 0.140f, 0.70f);
+            PushTread(dark, (Vector3){ x, AXLE_Y, z }, 16, TREAD_INNER, TREAD_OUTER, TREAD_Z, 0.70f);
         }
     }
 }
@@ -547,11 +553,14 @@ static Mesh FinishMesh(Builder *bd)
     return mesh;
 }
 
-enum { PART_BODY, PART_DARK, PART_METAL, PART_GLASS, PART_LAMP, PART_TAIL, PART_COUNT };
+enum { MAT_BODY, MAT_DARK, MAT_METAL, MAT_GLASS, MAT_LAMP, MAT_TAIL, MAT_COUNT };
 
-static Model parts[PART_COUNT];
+enum { GRP_HULL, GRP_CAB, GRP_BED, GRP_FRONT, GRP_REAR, GRP_DOORS, GRP_WINDSHIELD, GRP_GEAR, GRP_COUNT };
 
-static const Color partColors[PART_COUNT] = {
+static Model group[GRP_COUNT][MAT_COUNT];
+static BoundingBox groupBounds[GRP_COUNT];
+
+static const Color matColors[MAT_COUNT] = {
     { 196, 178, 133, 255 },
     {  40,  42,  46, 255 },
     { 122, 124, 130, 255 },
@@ -560,54 +569,124 @@ static const Color partColors[PART_COUNT] = {
     { 168,  46,  40, 255 },
 };
 
-static Texture2D grain[PART_COUNT];
+static Texture2D grain[MAT_COUNT];
 
-static const float partUvScale[PART_COUNT] = { 2.0f, 3.4f, 2.7f, 2.0f, 2.0f, 2.0f };
+static const float matUvScale[MAT_COUNT] = { 2.0f, 3.4f, 2.7f, 2.0f, 2.0f, 2.0f };
+
+static void BuildGroup(int g, Builder *b)
+{
+    switch (g) {
+        case GRP_HULL: BuildHull(&b[MAT_BODY], &b[MAT_DARK]); break;
+        case GRP_CAB: BuildCab(&b[MAT_BODY]); break;
+        case GRP_BED: BuildBed(&b[MAT_BODY]); break;
+        case GRP_FRONT: BuildFront(&b[MAT_BODY], &b[MAT_DARK], &b[MAT_LAMP]); break;
+        case GRP_REAR: BuildRear(&b[MAT_DARK], &b[MAT_TAIL]); break;
+        case GRP_DOORS: BuildSides(&b[MAT_DARK], &b[MAT_GLASS]); break;
+        case GRP_WINDSHIELD: BuildGlass(&b[MAT_GLASS]); break;
+        case GRP_GEAR: BuildRunningGear(&b[MAT_DARK], &b[MAT_METAL]); break;
+        default: break;
+    }
+}
 
 static void Init(void)
 {
-    Builder builders[PART_COUNT] = { 0 };
-    for (int i = 0; i < PART_COUNT; i++) builders[i].uvScale = partUvScale[i];
+    grain[MAT_BODY] = MakeGrain(256, 16, 0.90f, 1.0f, 11u);
+    grain[MAT_DARK] = MakeGrain(256, 12, 0.82f, 1.0f, 29u);
+    grain[MAT_METAL] = MakeGrain(256, 14, 0.86f, 1.0f, 47u);
 
-    BuildHull(&builders[PART_BODY], &builders[PART_DARK]);
-    BuildCab(&builders[PART_BODY]);
-    BuildBed(&builders[PART_BODY]);
-    BuildFront(&builders[PART_BODY], &builders[PART_DARK], &builders[PART_LAMP]);
-    BuildRear(&builders[PART_DARK], &builders[PART_TAIL]);
-    BuildSides(&builders[PART_DARK], &builders[PART_GLASS]);
-    BuildGlass(&builders[PART_GLASS]);
-    BuildRunningGear(&builders[PART_DARK], &builders[PART_METAL]);
+    for (int g = 0; g < GRP_COUNT; g++) {
+        Builder builders[MAT_COUNT] = { 0 };
+        for (int i = 0; i < MAT_COUNT; i++) builders[i].uvScale = matUvScale[i];
 
-    grain[PART_BODY] = MakeGrain(256, 16, 0.90f, 1.0f, 11u);
-    grain[PART_DARK] = MakeGrain(256, 12, 0.82f, 1.0f, 29u);
-    grain[PART_METAL] = MakeGrain(256, 14, 0.86f, 1.0f, 47u);
+        BuildGroup(g, builders);
 
-    for (int i = 0; i < PART_COUNT; i++) {
-        parts[i] = LoadModelFromMesh(FinishMesh(&builders[i]));
-        parts[i].materials[0].maps[MATERIAL_MAP_DIFFUSE].color = partColors[i];
-        if (grain[i].id != 0) parts[i].materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = grain[i];
-        HarnessApplyLighting(&parts[i]);
+        bool first = true;
+        for (int i = 0; i < MAT_COUNT; i++) {
+            if (builders[i].vertexCount == 0) continue;
+
+            group[g][i] = LoadModelFromMesh(FinishMesh(&builders[i]));
+            group[g][i].materials[0].maps[MATERIAL_MAP_DIFFUSE].color = matColors[i];
+            if (grain[i].id != 0) group[g][i].materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = grain[i];
+            HarnessApplyLighting(&group[g][i]);
+
+            BoundingBox box = GetModelBoundingBox(group[g][i]);
+            if (first) { groupBounds[g] = box; first = false; }
+            else {
+                groupBounds[g].min = Vector3Min(groupBounds[g].min, box.min);
+                groupBounds[g].max = Vector3Max(groupBounds[g].max, box.max);
+            }
+        }
+    }
+}
+
+static void DrawGroup(int g)
+{
+    for (int i = 0; i < MAT_COUNT; i++) {
+        if (group[g][i].meshCount > 0) DrawModel(group[g][i], Vector3Zero(), 1.0f, WHITE);
     }
 }
 
 static void Draw(void)
 {
-    for (int i = 0; i < PART_COUNT; i++) DrawModel(parts[i], Vector3Zero(), 1.0f, WHITE);
+    for (int g = 0; g < GRP_COUNT; g++) DrawGroup(g);
 }
 
 static void Unload(void)
 {
-    for (int i = 0; i < PART_COUNT; i++) {
-        UnloadModel(parts[i]);
+    for (int g = 0; g < GRP_COUNT; g++) {
+        for (int i = 0; i < MAT_COUNT; i++) {
+            if (group[g][i].meshCount > 0) UnloadModel(group[g][i]);
+        }
+    }
+    for (int i = 0; i < MAT_COUNT; i++) {
         if (grain[i].id != 0) UnloadTexture(grain[i]);
     }
 }
 
+static void DrawHull(void) { DrawGroup(GRP_HULL); }
+static void DrawCab(void) { DrawGroup(GRP_CAB); }
+static void DrawBed(void) { DrawGroup(GRP_BED); }
+static void DrawFront(void) { DrawGroup(GRP_FRONT); }
+static void DrawRear(void) { DrawGroup(GRP_REAR); }
+static void DrawDoors(void) { DrawGroup(GRP_DOORS); }
+static void DrawWindshield(void) { DrawGroup(GRP_WINDSHIELD); }
+static void DrawGear(void) { DrawGroup(GRP_GEAR); }
+
+static BoundingBox HullBounds(void) { return groupBounds[GRP_HULL]; }
+static BoundingBox CabBounds(void) { return groupBounds[GRP_CAB]; }
+static BoundingBox BedBounds(void) { return groupBounds[GRP_BED]; }
+static BoundingBox FrontBounds(void) { return groupBounds[GRP_FRONT]; }
+static BoundingBox RearBounds(void) { return groupBounds[GRP_REAR]; }
+static BoundingBox DoorsBounds(void) { return groupBounds[GRP_DOORS]; }
+static BoundingBox WindshieldBounds(void) { return groupBounds[GRP_WINDSHIELD]; }
+static BoundingBox GearBounds(void) { return groupBounds[GRP_GEAR]; }
+
+static const Part PARTS[GRP_COUNT] = {
+    { .name = "hull", .draw = DrawHull, .bounds = HullBounds },
+    { .name = "cab", .draw = DrawCab, .bounds = CabBounds },
+    { .name = "bed", .draw = DrawBed, .bounds = BedBounds },
+    { .name = "front", .draw = DrawFront, .bounds = FrontBounds },
+    { .name = "rear", .draw = DrawRear, .bounds = RearBounds },
+    { .name = "doors", .draw = DrawDoors, .bounds = DoorsBounds },
+    { .name = "windshield", .draw = DrawWindshield, .bounds = WindshieldBounds },
+    { .name = "running_gear", .draw = DrawGear, .bounds = GearBounds },
+};
+
 const Scene SCENE = {
     .name = "humvee",
+    .description =
+        "HMMWV cargo carrier at roughly real scale: 4.6 long, 2.16 wide, 1.83 to the roof.\n"
+        "Built as eight physical groups (hull, cab, bed, front, rear, doors, windshield,\n"
+        "running_gear), each emitting into up to six shared material meshes (body, dark,\n"
+        "metal, glass, lamp, tail) carrying procedural grain textures.\n"
+        "Hull is a swept slab whose underside lifts into wheel arches at AXLE_X = 1.65.\n"
+        "Wheels are 0.458-radius revolved tires on 0.215 rims, 16 tread lugs each,\n"
+        "with the lug base at 0.388 embedded 0.024 into the 0.412 tire profile.",
     .init = Init,
     .draw = Draw,
     .unload = Unload,
+    .parts = PARTS,
+    .partCount = GRP_COUNT,
     .target = { 0.0f, 0.95f, 0.0f },
     .orbitRadius = 6.8f,
     .orbitHeight = 2.8f,
