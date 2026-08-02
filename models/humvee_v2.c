@@ -669,6 +669,13 @@ static void BuildCab(void)
     Box(dark, SIDE_W - 0.012f, SIDE_W + 0.022f, 1.250f, 1.310f, -0.155f, -0.015f);
     Box(dark, SIDE_W - 0.012f, SIDE_W + 0.022f, 1.250f, 1.310f, -0.475f, -0.335f);
 
+    // External door hinges, each bridging the shut line between the door's leading edge and the pillar it hangs on.
+    for (int d = 0; d < 2; d++) {
+        float hz = (d == 0) ? 0.5525f : -0.2975f;
+        Box(dark, SIDE_W - 0.015f, SIDE_W + 0.025f, 0.800f, 0.850f, hz - 0.0225f, hz + 0.0225f);
+        Box(dark, SIDE_W - 0.015f, SIDE_W + 0.025f, 1.245f, 1.295f, hz - 0.0225f, hz + 0.0225f);
+    }
+
     // Wing mirror on two arms, its bracket overlapping the door's front window post rather than hanging clear of the body.
     Box(dark, 0.850f, 0.900f, 1.420f, 1.620f, 0.495f, 0.550f);
     Tube(dark, (Vector3){ 0.895f, 1.445f, 0.522f }, (Vector3){ 1.140f, 1.420f, 0.475f }, 0.017f, 0.017f, 8, true, true);
@@ -699,8 +706,10 @@ static void BuildBed(void)
     Box(body, -CORE_HW, CORE_HW, SILL_Y, BED_FLOOR_Y, TAIL_Z, CAB_BACK_Z);
     // Bed floor, wide enough to reach the tops of the wheel arches.
     Box(body, -CAB_IN, CAB_IN, 1.070f, BED_FLOOR_Y, TAIL_Z, CAB_BACK_Z);
-    // Tailgate.
+    // Tailgate, with the two horizontal stiffening ribs the cargo body carries.
     Box(body, -SIDE_W, SIDE_W, 1.040f, BED_TOP_Y, TAIL_Z - 0.060f, TAIL_Z);
+    Box(body, -0.850f, 0.850f, 1.120f, 1.155f, TAIL_Z - 0.085f, TAIL_Z - 0.060f);
+    Box(body, -0.850f, 0.850f, 1.290f, 1.325f, TAIL_Z - 0.085f, TAIL_Z - 0.060f);
     // Rear bumper.
     Box(metal, -HALF_W, HALF_W, 0.560f, 0.720f, BUMP_R_Z, TAIL_Z - 0.060f);
 
@@ -709,8 +718,18 @@ static void BuildBed(void)
     // Rear fender flare, wheel opening cut out below, flat shelf on top.
     ArchedPanel(body, WELL_IN, HALF_W, TAIL_Z, -1.050f, AXLE_R, SILL_Y, FLARE_TOP_Y, FLARE_TOP_Y);
     ArchedPanel(body, CORE_HW, WELL_IN, TAIL_Z, CAB_BACK_Z, AXLE_R, SILL_Y, BED_FLOOR_Y, BED_FLOOR_Y);
-    // Bed side wall, stepped inboard above the flare.
+    // Bed side wall, stepped inboard above the flare, with a capped top rail and external stiffening ribs.
     Box(body, CAB_IN, SIDE_W, FLARE_TOP_Y, BED_TOP_Y, TAIL_Z, CAB_BACK_Z);
+    Box(body, 0.785f, 0.885f, BED_TOP_Y, 1.455f, TAIL_Z, CAB_BACK_Z);
+    for (int i = 0; i < 3; i++) {
+        float rz = -1.350f - 0.250f * (float)i;
+        Box(body, SIDE_W, 0.895f, FLARE_TOP_Y, BED_TOP_Y, rz - 0.030f, rz + 0.030f);
+    }
+    // Tie-down cleats on the rail, and the tailgate latch and hinge.
+    Box(metal, 0.800f, 0.870f, 1.455f, 1.505f, -1.485f, -1.415f);
+    Box(metal, 0.800f, 0.870f, 1.455f, 1.505f, -1.835f, -1.765f);
+    Box(metal, 0.400f, 0.520f, 1.340f, 1.380f, TAIL_Z - 0.095f, TAIL_Z - 0.060f);
+    Box(metal, 0.350f, 0.470f, 1.030f, 1.070f, TAIL_Z - 0.085f, TAIL_Z - 0.055f);
     // Tail lights.
     Box(tail, 0.620f, 0.780f, 1.180f, 1.320f, TAIL_Z - 0.090f, TAIL_Z - 0.058f);
     Box(lamp, 0.620f, 0.780f, 1.100f, 1.170f, TAIL_Z - 0.090f, TAIL_Z - 0.058f);
@@ -880,10 +899,12 @@ const Scene SCENE = {
         "grille, protruding headlight housings with main and blackout lamps, corner\n"
         "markers, bumper with tow shackle brackets, hood latches. cab: cowl,\n"
         "two-piece 45-degree windscreen with a centre divider and wipers, A/B/C\n"
-        "pillars, four doors with glass and handles, roof at 1.830, rear window,\n"
-        "wing mirrors on twin arms off the door posts. bed: cargo box, rear\n"
-        "flares with a flat shelf on top, tailgate, tail lights, rear bumper on\n"
-        "gussets, whip antenna on the right rear corner, fuel filler on the left.\n"
+        "pillars, four doors with glass, handles and external hinges, roof at 1.830,\n"
+        "rear window, wing mirrors on twin arms off the door posts. bed: cargo box\n"
+        "with a capped top rail, external side ribs and tie-down cleats, rear\n"
+        "flares with a flat shelf on top, ribbed tailgate on hinges with latches,\n"
+        "tail lights, rear bumper on gussets, whip antenna on the right rear\n"
+        "corner, fuel filler on the left.\n"
         "running_gear: tyres, rims with eight lug nuts, half shafts, double\n"
         "wishbones, coil springs, dampers, centred differentials.\n"
         "\n"
