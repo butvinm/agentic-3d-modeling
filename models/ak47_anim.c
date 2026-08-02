@@ -1046,8 +1046,10 @@ static void BuildWood(void)
 #define SHOT_T       0.100f    // real seconds for one action cycle, at 600 rpm
 #define BURST_T      (SHOTS * SHOT_T)
 #define TOTAL_T      0.500f    // five shot periods: three firing, two of pause
-#define SLOWDOWN     16.0f
-#define CYCLE        (TOTAL_T * SLOWDOWN)   // 8.0 s of playback
+// SLOWDOWN is the ONLY thing in this file that is about playback rather than about the rifle. Everything else is computed in real seconds, so this scales what the interactive window and SCENE.duration do and nothing else: --anim samples N evenly spaced phases of the cycle, so the rendered frames come out identical whatever this is set to. To play those frames back at real speed, run them at N / TOTAL_T fps, which is 30 fps for --frames 15.
+// At 16 the burst read as a slow-motion replay. At 4 it reads as automatic fire and the action is still followable; 1 is real time, where a whole shot is six frames at 60 Hz and the carrier's stroke is two of them.
+#define SLOWDOWN     4.0f
+#define CYCLE        (TOTAL_T * SLOWDOWN)   // 2.0 s of playback for the whole burst
 
 // Receiver floor line, measured off the elevation: it drops fastest over the magazine well.
 static float RecvFloor(float z)
@@ -1603,6 +1605,10 @@ static void BuildPuff(void)
 
 // Fractions of ONE shot, not of the cycle.
 #define T_FLASH     0.030f   // flash gone by here: 3 ms of real time
+
+// A flash is 3 ms. At sixteen times slow that was 48 ms of playback, three frames at 60 Hz, and visible; at four times it is 12 ms, less than one frame, so the interactive window would drop it on most cycles and the rounds would go off invisibly. This floor holds a flash on for FLASH_MIN_PLAYBACK of PLAYBACK time however fast the playback is set, and it bites only when the playback is fast: at the old sixteen times it is shorter than the real duration and does nothing at all.
+// It is the one place in this file that looks at playback rather than at the rifle, and it is a concession to the frame rate rather than a claim about muzzle flash. It changes nothing about the review renders, where the flash is still far shorter than the interval between frames and phase 0 lands inside it either way.
+#define FLASH_MIN_PLAYBACK 0.045f
 #define T_UNLOCK    0.010f   // carrier starts moving
 #define T_REAR      0.300f   // fraction of a shot at which it reaches full travel
 #define T_DWELL     0.360f
@@ -1742,9 +1748,10 @@ static void Update(float t)
     // The flash is gas still leaving the barrel, so it belongs to the rifle and moves with it. Over its three milliseconds the rifle has barely started to move anyway: the flash is over long before the recoil is.
     Vector3 fm = ToWorld((Vector3){ 0.0f, BORE, 0.0f });
     gFlashOn = false;
+    float flashT = fmaxf(T_FLASH * SHOT_T, FLASH_MIN_PLAYBACK / SLOWDOWN);
     for (int k = 0; k < SHOTS; k++) {
         float dt = tr - (float)k * SHOT_T;
-        if (dt >= 0.0f && dt < T_FLASH * SHOT_T) gFlashOn = true;
+        if (dt >= 0.0f && dt < flashT) gFlashOn = true;
     }
     gFlashX = MatrixMultiply(MatrixTranslate(fm.x, fm.y, fm.z), rifle);
 
@@ -2093,8 +2100,10 @@ const Scene SCENE = {
         "AK-47 with a Type 2 milled receiver and fixed wooden furniture, the configuration in references/ak47/ref_01.png, posed through a three-round burst. This is models/ak47.c with four bodies taken out of the static groups and given their own frames; everything else is that model unchanged.\n"
         "\n"
         "WHAT MOVES, AND WHAT IS CLAIMED\n"
-        "Three rounds, played back at one sixteenth speed. The AK-47's cyclic rate is 600 rounds a minute, so one action cycle is 0.100 s of real time and the burst is 0.300 s; the cycle runs five shot periods, three firing and two of pause, so the last round has somewhere to finish and the loop has a gap in it. That is 0.500 s of real time over 8.0 s of playback. Every motion is computed in real seconds and played back on that one clock, which is what lets three ballistic cases, three smoke plumes and the recoil of three rounds share a clock with the carrier that threw them rather than being animated by eye.\n"
-        "Ignition therefore falls on a fifth of the cycle: phases 0, 0.2 and 0.4. That is not tidiness, it is the only way the flashes can be rendered at all. A flash lasts about 3 ms, under one percent of this cycle, so no evenly spaced set of frames catches one by luck. Any --frames that is a multiple of 5 lands a frame on all three ignitions; --frames 15 is the useful default, and --frames 8 will show the first flash and miss the other two.\n"
+        "Three rounds, played back at one quarter speed. The AK-47's cyclic rate is 600 rounds a minute, so one action cycle is 0.100 s of real time and the burst is 0.300 s; the cycle runs five shot periods, three firing and two of pause, so the last round has somewhere to finish and the loop has a gap in it. That is 0.500 s of real time over 2.0 s of playback. Every motion is computed in real seconds and played back on that one clock, which is what lets three ballistic cases, three smoke plumes and the recoil of three rounds share a clock with the carrier that threw them rather than being animated by eye.\n"
+        "The playback rate is the ONE quantity in this model that is about playback rather than about the rifle, and it scales only what the interactive window and SCENE.duration do. It cannot change a rendered sequence: --anim samples N evenly spaced phases of the cycle, so the frames come out identical whatever it is set to, which was checked rather than assumed by rendering fifteen frames at one sixteenth speed and again at one quarter and finding all fifteen byte for byte the same. If a rendered sequence looks slow, the number to change is the frame rate it is played at, and real speed is N / 0.5 fps: 30 fps for --frames 15, 60 for --frames 30.\n"
+        "One consequence is worth naming. A flash is 3 ms, which at one sixteenth speed was three frames of a 60 Hz window and at one quarter would be less than one, so the window would drop it and rounds would go off invisibly. A flash is therefore held for a minimum of 45 ms of PLAYBACK, which bites only when the playback is fast and does nothing at the old rate. That is a concession to the frame rate rather than a claim about muzzle flash, and it does not reach the renders, where a flash is still far shorter than the gap between frames.\n"
+        "Ignition falls on a fifth of the cycle: phases 0, 0.2 and 0.4. That is not tidiness, it is the only way the flashes can be rendered at all. A flash lasts about 3 ms, under one percent of this cycle, so no evenly spaced set of frames catches one by luck. Any --frames that is a multiple of 5 lands a frame on all three ignitions; --frames 15 is the useful default, and --frames 8 will show the first flash and miss the other two.\n"
         "\n"
         "recoil: derived, not styled, and applied as a parent frame that every body on the rifle is posed inside. A 7.9 g M43 bullet at 715 m/s into a 4.39 kg rifle with a loaded magazine gives 1.29 m/s by conservation of momentum. The bore axis at y 204.4 is resisted at the shoulder, which the buttplate centre puts at y 121.0, an 83.4 mm moment arm; against about 0.81 kg m^2 that is 0.58 rad/s. Each round contributes that impulse and they are summed, which is where a burst stops being three separate shots.\n"
         "The two responses have DIFFERENT time constants on purpose, and that is the whole of why a burst climbs. The shoulder absorbs the rearward push and gives it back inside 60 ms, which is less than the 100 ms between rounds, so the linear recoil is spent before the next round fires and does not accumulate: every shot moves the rifle back the same 24.6 mm. The arms let the muzzle rise and bring it down over 220 ms, which is longer than the gap, so the second round lands on top of the first and the third on top of both. Peak climb is 3.53 degrees against the 2.33 a single round gives, lifting the muzzle 53 mm rather than 10.\n"
