@@ -401,8 +401,16 @@ static void GroupUnload(Group *g)
 #define BUMP_R_Z     -2.220f
 #define COWL_Z        0.620f
 #define COWL_Y        1.220f
-#define WS_TOP_Z      0.065f   // 0.555 forward of the cowl for a 0.555 rise: 45 degrees exactly
 #define WS_TOP_Y      1.775f
+// Lean of the windscreen off vertical, as a tangent.
+// The HMMWV's screen stands close to upright: measured off references/humvee_v2/ref_07.jpg (side elevation) at 6 degrees, ref_05 at 9 and ref_01 at 11 once each view's yaw is divided out.
+// 10 degrees is the middle of that spread.
+#define WS_RAKE       0.176f
+#define WS_TOP_Z      (COWL_Z - (WS_TOP_Y - COWL_Y) * WS_RAKE)
+// Rear face of the A-pillar, and the door's leading edge one shut line behind it.
+// Both are derived rather than typed: a door edge written as an absolute z is what put the door in front of the glass at the old 45-degree rake.
+#define WS_PILLAR_Z   (WS_TOP_Z - 0.090f)
+#define DOOR_F_Z      (WS_PILLAR_Z - 0.020f)
 #define CAB_BACK_Z   -1.150f
 #define ROOF_Y        1.830f
 #define RAIL_Y        1.775f   // underside of the roof slab and of the side rails
@@ -578,6 +586,15 @@ static void BuildFront(void)
 // cab: doors, pillars, glass and roof
 // ---------------------------------------------------------------------------
 
+// A point on the windscreen plane, f of the way from the cowl up to the header, pushed out along the glass normal by `out`.
+// Everything laid on the screen (its own frame, the divider, the wipers) is placed through this, so the rake lives in one constant instead of in every literal that touches the glass.
+static Vector3 WindscreenPoint(float x, float f, float out)
+{
+    float dy = WS_TOP_Y - COWL_Y, dz = WS_TOP_Z - COWL_Z;
+    float len = sqrtf(dy * dy + dz * dz);
+    return (Vector3){ x, COWL_Y + f * dy - out * dz / len, COWL_Z + f * dz + out * dy / len };
+}
+
 static void BuildCab(void)
 {
     Group *g = &gCab;
@@ -592,7 +609,7 @@ static void BuildCab(void)
             { -CAB_IN, 0.600f, CAB_BACK_Z + 0.020f }, { CAB_IN, 0.600f, CAB_BACK_Z + 0.020f },
             { CAB_IN, 0.600f, 0.580f },               { -CAB_IN, 0.600f, 0.580f },
             { -CAB_IN, ROOF_Y - 0.020f, CAB_BACK_Z + 0.020f }, { CAB_IN, ROOF_Y - 0.020f, CAB_BACK_Z + 0.020f },
-            { CAB_IN, ROOF_Y - 0.020f, 0.000f },      { -CAB_IN, ROOF_Y - 0.020f, 0.000f },
+            { CAB_IN, ROOF_Y - 0.020f, WS_TOP_Z - 0.040f }, { -CAB_IN, ROOF_Y - 0.020f, WS_TOP_Z - 0.040f },
         };
         Hex(dark, c);
     }
@@ -600,37 +617,34 @@ static void BuildCab(void)
     // Cowl: the shelf between the hood and the base of the windscreen, carried down to the sill so no void is left between the engine bay and the cab.
     Box(body, -SIDE_W, SIDE_W, SILL_Y, COWL_Y, COWL_Z, HOOD_BACK_Z);
 
-    // Windscreen, raked 45 degrees. Glass first, then the frame around it.
+    // Windscreen. Glass first, then the frame around it. Both ends come off WindscreenPoint, so the rake is not restated here.
     {
-        float len = sqrtf((COWL_Z - WS_TOP_Z) * (COWL_Z - WS_TOP_Z) + (WS_TOP_Y - COWL_Y) * (WS_TOP_Y - COWL_Y));
-        Vector3 n = { 0.0f, (COWL_Z - WS_TOP_Z) / len, (WS_TOP_Y - COWL_Y) / len };
-        Vector3 t = Vector3Scale(n, -0.040f);
-        Vector3 a = { -CAB_IN, COWL_Y, COWL_Z }, b = { CAB_IN, COWL_Y, COWL_Z };
-        Vector3 c = { CAB_IN, WS_TOP_Y, WS_TOP_Z }, d = { -CAB_IN, WS_TOP_Y, WS_TOP_Z };
-        Vector3 a2 = Vector3Add(a, t), b2 = Vector3Add(b, t), c2 = Vector3Add(c, t), d2 = Vector3Add(d, t);
+        Vector3 a = WindscreenPoint(-CAB_IN, 0.0f, 0.0f), b = WindscreenPoint(CAB_IN, 0.0f, 0.0f);
+        Vector3 c = WindscreenPoint(CAB_IN, 1.0f, 0.0f), d = WindscreenPoint(-CAB_IN, 1.0f, 0.0f);
+        Vector3 a2 = WindscreenPoint(-CAB_IN, 0.0f, -0.040f), b2 = WindscreenPoint(CAB_IN, 0.0f, -0.040f);
+        Vector3 c2 = WindscreenPoint(CAB_IN, 1.0f, -0.040f), d2 = WindscreenPoint(-CAB_IN, 1.0f, -0.040f);
         Quad(glass, a, b, c, d);
         Quad(glass, b, a2, d2, c);
         Quad(glass, a2, b2, c2, d2);
 
         // Centre divider of the two-piece windscreen, standing 30 mm proud of the glass along its normal.
-        Vector3 o = Vector3Scale(n, 0.030f);
         // Corner order maps (x, outward normal, top-to-bottom) onto the hexahedron's own (x, y, z); that triad is right-handed, so the winding still resolves outwards.
-        Vector3 et = { 0.034f, WS_TOP_Y, WS_TOP_Z }, eb = { 0.034f, COWL_Y, COWL_Z };
+        Vector3 et = WindscreenPoint(0.034f, 1.0f, 0.0f), eb = WindscreenPoint(0.034f, 0.0f, 0.0f);
+        Vector3 ot = WindscreenPoint(0.034f, 1.0f, 0.030f), ob = WindscreenPoint(0.034f, 0.0f, 0.030f);
         Vector3 e[8] = {
             { -et.x, et.y, et.z }, { et.x, et.y, et.z }, { eb.x, eb.y, eb.z }, { -eb.x, eb.y, eb.z },
-            Vector3Add((Vector3){ -et.x, et.y, et.z }, o), Vector3Add(et, o),
-            Vector3Add(eb, o), Vector3Add((Vector3){ -eb.x, eb.y, eb.z }, o),
+            { -ot.x, ot.y, ot.z }, { ot.x, ot.y, ot.z }, { ob.x, ob.y, ob.z }, { -ob.x, ob.y, ob.z },
         };
         Hex(body, e);
     }
 
-    // Roof and the header above the windscreen, their top faces drawn in 35 mm either side so the hardtop's edge is chamfered rather than a full-width slab.
-    for (int i = 0; i < 2; i++) {
-        float rz0 = (i == 0) ? CAB_BACK_Z : 0.020f;
-        float rz1 = (i == 0) ? 0.020f : 0.145f;
+    // Roof, its top face drawn in 35 mm either side so the hardtop's edge is chamfered rather than a full-width slab.
+    // The front edge is 40 mm of header ahead of the glass top rather than an absolute z, so the roof follows the screen when the rake changes.
+    {
+        float rz1 = WS_TOP_Z + 0.040f;
         Vector3 c[8] = {
-            { -SIDE_W, RAIL_Y, rz0 }, { SIDE_W, RAIL_Y, rz0 }, { SIDE_W, RAIL_Y, rz1 }, { -SIDE_W, RAIL_Y, rz1 },
-            { -0.835f, ROOF_Y, rz0 }, { 0.835f, ROOF_Y, rz0 }, { 0.835f, ROOF_Y, rz1 }, { -0.835f, ROOF_Y, rz1 },
+            { -SIDE_W, RAIL_Y, CAB_BACK_Z }, { SIDE_W, RAIL_Y, CAB_BACK_Z }, { SIDE_W, RAIL_Y, rz1 }, { -SIDE_W, RAIL_Y, rz1 },
+            { -0.835f, ROOF_Y, CAB_BACK_Z }, { 0.835f, ROOF_Y, CAB_BACK_Z }, { 0.835f, ROOF_Y, rz1 }, { -0.835f, ROOF_Y, rz1 },
         };
         Hex(body, c);
     }
@@ -641,28 +655,32 @@ static void BuildCab(void)
 
     GroupMark m = GroupMarkNow(g);
 
-    // A-pillar, following the rake of the windscreen.
+    // A-pillar: its front face is the windscreen plane, its rear face the vertical plane the door shuts against.
+    // It is a wedge rather than a constant-thickness post, which is what lets the near-upright screen and the vertical door edge meet without a filler panel between them.
     {
         Vector3 c[8] = {
-            { CAB_IN, COWL_Y, COWL_Z - 0.090f },  { SIDE_W, COWL_Y, COWL_Z - 0.090f },
-            { SIDE_W, WS_TOP_Y - 0.090f, WS_TOP_Z }, { CAB_IN, WS_TOP_Y - 0.090f, WS_TOP_Z },
-            { CAB_IN, COWL_Y + 0.090f, COWL_Z },  { SIDE_W, COWL_Y + 0.090f, COWL_Z },
-            { SIDE_W, WS_TOP_Y, WS_TOP_Z },       { CAB_IN, WS_TOP_Y, WS_TOP_Z },
+            { CAB_IN, WS_TOP_Y, WS_PILLAR_Z }, { SIDE_W, WS_TOP_Y, WS_PILLAR_Z },
+            { SIDE_W, COWL_Y, WS_PILLAR_Z },   { CAB_IN, COWL_Y, WS_PILLAR_Z },
+            { CAB_IN, WS_TOP_Y, WS_TOP_Z },    { SIDE_W, WS_TOP_Y, WS_TOP_Z },
+            { SIDE_W, COWL_Y, COWL_Z },        { CAB_IN, COWL_Y, COWL_Z },
         };
         Hex(body, c);
     }
-    // Filler between the raked pillar and the vertical front edge of the door, its underside following the pillar's top face.
-    Prism(body, CAB_IN, SIDE_W, 0.145f, 0.560f, 1.708f, 1.360f, RAIL_Y, RAIL_Y);
+
+    // Doors: skin, window frame and glass. 20 mm gaps all round give shut lines.
+    // Both leaves are cut from the run between the A-pillar and the C-pillar, so they come out equal in length and follow the pillar when the rake moves it.
+    const float doorBack = CAB_BACK_Z + 0.100f;
+    const float doorLen = (DOOR_F_Z - doorBack - 0.080f - 0.040f) / 2.0f;
+    const float bPillarZ1 = DOOR_F_Z - doorLen - 0.020f;
+    const float door[2][2] = { { DOOR_F_Z - doorLen, DOOR_F_Z }, { doorBack, bPillarZ1 - 0.100f } };
 
     // B and C pillars. Above RAIL_Y the chamfered roof is the only bodywork, so there is no separate side rail to hide the chamfer.
-    Box(body, CAB_IN, SIDE_W, DOOR_Y0, RAIL_Y, -0.290f, -0.210f);
+    Box(body, CAB_IN, SIDE_W, DOOR_Y0, RAIL_Y, bPillarZ1 - 0.080f, bPillarZ1);
     Box(body, CAB_IN, SIDE_W, SILL_Y, RAIL_Y, CAB_BACK_Z, -1.070f);
 
     // Cowl side, closing the body between the door's leading edge and the fender.
-    Box(body, CAB_IN, SIDE_W, DOOR_Y0 - 0.020f, COWL_Y, 0.560f, HOOD_BACK_Z);
+    Box(body, CAB_IN, SIDE_W, DOOR_Y0 - 0.020f, COWL_Y, DOOR_F_Z + 0.020f, HOOD_BACK_Z);
 
-    // Doors: skin, window frame and glass. 20 mm gaps all round give shut lines.
-    const float door[2][2] = { { -0.190f, 0.540f }, { CAB_BACK_Z + 0.100f, -0.310f } };
     for (int d = 0; d < 2; d++) {
         float z0 = door[d][0], z1 = door[d][1];
         Box(body, CAB_IN, SIDE_W - 0.010f, DOOR_Y0 + 0.020f, BELT_Y, z0, z1);
@@ -671,26 +689,31 @@ static void BuildCab(void)
         Box(body, CAB_IN, SIDE_W - 0.010f, GLASS_Y0, GLASS_Y1, z0, z0 + 0.040f);
         Box(body, CAB_IN, SIDE_W - 0.010f, GLASS_Y0, GLASS_Y1, z1 - 0.040f, z1);
         Box(glass, CAB_IN, SIDE_W - 0.040f, GLASS_Y0, GLASS_Y1, z0 + 0.040f, z1 - 0.040f);
-    }
-    Box(dark, SIDE_W - 0.012f, SIDE_W + 0.022f, 1.250f, 1.310f, -0.155f, -0.015f);
-    Box(dark, SIDE_W - 0.012f, SIDE_W + 0.022f, 1.250f, 1.310f, -0.475f, -0.335f);
 
-    // External door hinges, each bridging the shut line between the door's leading edge and the pillar it hangs on.
-    for (int d = 0; d < 2; d++) {
-        float hz = (d == 0) ? 0.5525f : -0.2975f;
+        // Handle 35 mm in from the leaf's trailing edge, and the two external hinges bridging the shut line at its leading edge.
+        // Both are measured off this leaf's own z0/z1: as literals outside the loop the rear handle had drifted to 25 mm from its own hinge.
+        Box(dark, SIDE_W - 0.012f, SIDE_W + 0.022f, 1.250f, 1.310f, z0 + 0.035f, z0 + 0.175f);
+        float hz = z1 + 0.0125f;
         Box(dark, SIDE_W - 0.015f, SIDE_W + 0.025f, 0.800f, 0.850f, hz - 0.0225f, hz + 0.0225f);
         Box(dark, SIDE_W - 0.015f, SIDE_W + 0.025f, 1.245f, 1.295f, hz - 0.0225f, hz + 0.0225f);
     }
 
-    // Wing mirror on two arms, its bracket overlapping the door's front window post rather than hanging clear of the body.
-    Box(dark, 0.850f, 0.900f, 1.420f, 1.620f, 0.495f, 0.550f);
-    Tube(dark, (Vector3){ 0.895f, 1.445f, 0.522f }, (Vector3){ 1.140f, 1.420f, 0.475f }, 0.017f, 0.017f, 8, true, true);
-    Tube(dark, (Vector3){ 0.895f, 1.595f, 0.522f }, (Vector3){ 1.140f, 1.580f, 0.475f }, 0.017f, 0.017f, 8, true, true);
-    Box(dark, 1.120f, 1.290f, 1.350f, 1.660f, 0.415f, 0.480f);
-    Box(glass, 1.135f, 1.275f, 1.370f, 1.640f, 0.405f, 0.417f);
+    // Wing mirror on two arms, its bracket overlapping the front door's leading window post rather than hanging clear of the body.
+    {
+        float mz = DOOR_F_Z;
+        Box(dark, 0.850f, 0.900f, 1.420f, 1.620f, mz - 0.045f, mz + 0.010f);
+        Tube(dark, (Vector3){ 0.895f, 1.445f, mz - 0.018f }, (Vector3){ 1.140f, 1.420f, mz - 0.065f }, 0.017f, 0.017f, 8, true, true);
+        Tube(dark, (Vector3){ 0.895f, 1.595f, mz - 0.018f }, (Vector3){ 1.140f, 1.580f, mz - 0.065f }, 0.017f, 0.017f, 8, true, true);
+        Box(dark, 1.120f, 1.290f, 1.350f, 1.660f, mz - 0.125f, mz - 0.060f);
+        Box(glass, 1.135f, 1.275f, 1.370f, 1.640f, mz - 0.135f, mz - 0.123f);
+    }
 
-    // Wiper, laid 20 mm proud of the windscreen: both ends satisfy y + z = 1.868, the plane's own equation offset along its normal.
-    Tube(dark, (Vector3){ 0.180f, 1.308f, 0.560f }, (Vector3){ 0.500f, 1.468f, 0.400f }, 0.012f, 0.012f, 8, true, true);
+    // Wiper, laid 20 mm proud of the windscreen. Both ends are points on the glass pushed out along its normal, so the blade stays on the screen at any rake.
+    {
+        Vector3 pivot = WindscreenPoint(0.180f, 0.133f, 0.020f);
+        Vector3 tip = WindscreenPoint(0.500f, 0.421f, 0.020f);
+        Tube(dark, pivot, tip, 0.012f, 0.012f, 8, true, true);
+    }
 
     GroupMirrorX(g, m);
     GroupFinish(g, "cab");
@@ -852,6 +875,25 @@ static void BuildGear(void)
 // Scene
 // ---------------------------------------------------------------------------
 
+// The front door's leading edge is a vertical line, the windscreen a leaning plane, so the clearance between them is smallest at the top of the door and it is easy to leave the door standing in front of the glass.
+// That is exactly what a 45-degree rake against a door edge typed as an absolute z used to do here: at the door top the edge sat 0.47 in front of the screen.
+// Walk the door's height and measure the gap rather than trusting the constants to stay in step.
+static void CheckDoorClearsScreen(void)
+{
+    float worst = 1e9f;
+    float worstY = 0.0f;
+    for (int i = 0; i <= 200; i++) {
+        float y = DOOR_Y0 + (DOOR_TOP_Y - DOOR_Y0) * (float)i / 200.0f;
+        if (y < COWL_Y) continue;
+        float screenZ = COWL_Z - (y - COWL_Y) * WS_RAKE;
+        float gap = screenZ - DOOR_F_Z;
+        if (gap < worst) { worst = gap; worstY = y; }
+    }
+    if (worst < 0.020f) {
+        TraceLog(LOG_WARNING, "humvee_v2: door leading edge clears the windscreen by only %.3f m at y = %.3f", worst, worstY);
+    }
+}
+
 static void Init(void)
 {
     BuildHull();
@@ -859,6 +901,7 @@ static void Init(void)
     BuildCab();
     BuildBed();
     BuildGear();
+    CheckDoorClearsScreen();
 }
 
 static void Unload(void)
@@ -905,9 +948,10 @@ const Scene SCENE = {
         "slab in a trough between raised fender crowns, arched fenders, eight-slat\n"
         "grille, protruding headlight housings with main and blackout lamps, corner\n"
         "markers, bumper with tow shackle brackets, hood latches. cab: cowl,\n"
-        "two-piece 45-degree windscreen with a centre divider and wipers, A/B/C\n"
-        "pillars, four doors with glass, handles and external hinges, chamfered\n"
-        "hardtop roof at 1.830 drawn in 35 mm either side of the body,\n"
+        "two-piece windscreen leaning 10 degrees off vertical with a centre divider\n"
+        "and wipers, A/B/C pillars, four equal-length doors with glass, handles and\n"
+        "external hinges, chamfered hardtop roof at 1.830 drawn in 35 mm either side\n"
+        "of the body and carried forward to 40 mm ahead of the glass top,\n"
         "rear window, wing mirrors on twin arms off the door posts. bed: cargo box\n"
         "with a capped top rail, external side ribs and tie-down cleats, rear\n"
         "flares with a flat shelf on top, ribbed tailgate on hinges with latches,\n"
