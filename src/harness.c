@@ -244,7 +244,7 @@ static void RunInteractive(void)
 
 static void Usage(const char *argv0)
 {
-    printf("usage: %s [--shots DIR] [--frames N] [--size WxH] [--supersample N] [--part NAME]\n", argv0);
+    printf("usage: %s [--shots DIR] [--anim] [--frames N] [--size WxH] [--supersample N] [--part NAME]\n", argv0);
     printf("  no args        open an interactive orbit-camera window\n");
     printf("  --shots        render N turntable views to DIR as PNG and exit\n");
     printf("  --anim         with --shots, hold the camera and step the pose through one cycle instead\n");
