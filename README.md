@@ -1,6 +1,8 @@
 # Rendering
 
-Models: `ak47`, `crank_slider`, `humvee`, `humvee_v2`, `penguin`, `torus_knot`.
+Models: `ak47`, `ak47_anim`, `crank_slider`, `humvee`, `humvee_v2`, `penguin`, `torus_knot`.
+
+`crank_slider` and `ak47_anim` are posed; the rest are static.
 
 ## Build
 
