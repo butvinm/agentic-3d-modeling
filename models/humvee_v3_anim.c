@@ -922,15 +922,16 @@ static void GroupUnload(Group *g)
 #define BED_FLOOR_Y   1.100f
 #define BED_TOP_Y     1.420f
 #define FLARE_TOP_Y   1.160f
-#define FENDER_Y0     1.220f   // front fender crown, flat alongside the hood
-#define FENDER_Y1     1.120f   // ... and where it falls away over the nose
-// The hood is a short flat panel, and forward of it the nose falls away to the grille.
-// Measured off references/humvee_v3_anim/ref_10.jpg, a near-orthographic side elevation of the cargo variant, scaled by the 3.30 m wheelbase at 403 px/m: the flat top runs 0.90 m and its front edge sits 0.10 m ahead of the front axle, with the nose then dropping 0.18 m over 0.35 m, about 27 degrees.
-// It used to be 1.46 m of gently sloping lid running flat to the grille, which is 0.45 m too far forward at the front and leaves the truck no nose at all.
-#define HOOD_FRONT_Z  1.760f
-#define HOOD_TOP_Y    1.160f
-#define HOOD_BASE_Y   1.100f
-#define NOSE_TOP_Y    1.000f   // top of the grille, where the nose slope lands
+#define FENDER_CROWN  0.060f   // how far the fender stands above the hood beside it
+// The front's top skin is one curve, not a flat lid with a ramp bolted to its front.
+// Measured off references/humvee_v3_anim/ref_10.jpg, a near-orthographic side elevation of this variant, scaled by the 3.30 m wheelbase at 403 px/m and anchored vertically on the axle centre. Reading the top line back into these coordinates gives 1.208 m at z = 0.85 falling to 1.064 m at z = 2.03, and the local slope over that run goes 4.0, 5.2, 8.3, 11.7, 13.8 degrees: it starts falling at the cowl and steepens the whole way, with no flat section and no crease anywhere.
+// So the skin is a quadratic whose slope grows linearly, normalised to f(0) = 0 and f(1) = 1 and split so the front slope is 3.45 times the rear one, which is the ratio those five readings give. Both ends keep the heights they already had, since the mean slope this file was built with -- 0.160 m over 1.420 -- already matches the reference's 0.144 over 1.240 to within three per cent. What was wrong was where the drop sat, not how much of it there was.
+// An earlier reading off ref_07.jpg said flat-then-27-degrees. That image is 406 px wide, which cannot separate a gentle curve from a flat panel with a crease in it.
+#define HOOD_BACK_EDGE 0.740f  // hood panel's rear edge, one shut line behind the cowl
+#define HOOD_NOSE_Z   2.140f   // ... and its front edge, one shut line above the grille
+#define HOOD_TOP_Y    1.160f   // skin height at the rear edge
+#define NOSE_TOP_Y    1.000f   // ... and where it lands on the top of the grille
+#define HOOD_THICK    0.070f
 
 // Suspension travel about the static ride height, and the free length of the coil the travel compresses.
 #define SUSP_UP       0.110f   // hub rising towards the body
@@ -969,8 +970,61 @@ static Vector3 SoffitNormal(float z, float zc, float y, float yFloor)
     return (Vector3){ 0.0f, (AXLE_Y - y) / ARCH_R, (zc - z) / ARCH_R };
 }
 
+// topFn, when given, overrides yTop0/yTop1 and carries smooth normals, so a panel can follow a curved skin instead of a straight lerp between two heights.
+// Upward normal of a surface y = f(z), from the curve's own slope.
+// A first difference is enough here and a long way from the trap torus_knot hit: these curves are low-order polynomials sampled at 4 mm on values near 1, so the quantisation lands around 1e-5 against slopes of order 0.1.
+static Vector3 SlopeNormal(float (*f)(float), float z)
+{
+    const float h = 0.004f;
+    float d = (f(z + h) - f(z - h)) / (2.0f * h);
+    return Vector3Normalize((Vector3){ 0.0f, 1.0f, -d });
+}
+
+// Slab between x0..x1 and z0..z1 whose top follows top(z) and whose floor follows bot(z), or a flat yFlat when bot is NULL.
+// Swept in the same way ArchedPanel sweeps its arch, so the skin reads as a curve rather than as a staircase.
+static void CurvedSlab(Builder *b, float x0, float x1, float z0, float z1,
+                       float (*top)(float), float (*bot)(float), float yFlat)
+{
+    const float step = 0.024f;
+    int steps = (int)ceilf((z1 - z0) / step);
+    if (steps < 1) steps = 1;
+
+    for (int i = 0; i < steps; i++) {
+        float za = Lerp(z0, z1, (float)i / (float)steps);
+        float zb = Lerp(z0, z1, (float)(i + 1) / (float)steps);
+        float yta = top(za), ytb = top(zb);
+        float yba = bot ? bot(za) : yFlat, ybb = bot ? bot(zb) : yFlat;
+        Vector3 ta = SlopeNormal(top, za), tb = SlopeNormal(top, zb);
+
+        QuadN(b, (Vector3){ x0, yta, za }, (Vector3){ x0, ytb, zb },
+                 (Vector3){ x1, ytb, zb }, (Vector3){ x1, yta, za }, ta, tb, tb, ta);
+        if (bot) {
+            Vector3 ba = Vector3Negate(SlopeNormal(bot, za)), bb = Vector3Negate(SlopeNormal(bot, zb));
+            QuadN(b, (Vector3){ x0, yba, za }, (Vector3){ x1, yba, za },
+                     (Vector3){ x1, ybb, zb }, (Vector3){ x0, ybb, zb }, ba, ba, bb, bb);
+        } else {
+            Quad(b, (Vector3){ x0, yba, za }, (Vector3){ x1, yba, za },
+                    (Vector3){ x1, ybb, zb }, (Vector3){ x0, ybb, zb });
+        }
+        Quad(b, (Vector3){ x1, yba, za }, (Vector3){ x1, yta, za },
+                (Vector3){ x1, ytb, zb }, (Vector3){ x1, ybb, zb });
+        Quad(b, (Vector3){ x0, yba, za }, (Vector3){ x0, ybb, zb },
+                (Vector3){ x0, ytb, zb }, (Vector3){ x0, yta, za });
+
+        if (i == 0) {
+            Quad(b, (Vector3){ x0, yba, za }, (Vector3){ x0, yta, za },
+                    (Vector3){ x1, yta, za }, (Vector3){ x1, yba, za });
+        }
+        if (i == steps - 1) {
+            Quad(b, (Vector3){ x0, ybb, zb }, (Vector3){ x1, ybb, zb },
+                    (Vector3){ x1, ytb, zb }, (Vector3){ x0, ytb, zb });
+        }
+    }
+}
+
 static void ArchedPanel(Builder *b, float x0, float x1, float z0, float z1,
-                        float zc, float yFloor, float yTop0, float yTop1)
+                        float zc, float yFloor, float yTop0, float yTop1,
+                        float (*topFn)(float))
 {
     const float step = 0.028f;
     int steps = (int)ceilf((z1 - z0) / step);
@@ -981,14 +1035,21 @@ static void ArchedPanel(Builder *b, float x0, float x1, float z0, float z1,
         float t1 = (float)(i + 1) / (float)steps;
         float za = Lerp(z0, z1, t0), zb = Lerp(z0, z1, t1);
         float yba = fmaxf(yFloor, ArchTop(za, zc)), ybb = fmaxf(yFloor, ArchTop(zb, zc));
-        float yta = Lerp(yTop0, yTop1, t0), ytb = Lerp(yTop0, yTop1, t1);
+        float yta = topFn ? topFn(za) : Lerp(yTop0, yTop1, t0);
+        float ytb = topFn ? topFn(zb) : Lerp(yTop0, yTop1, t1);
         Vector3 na = SoffitNormal(za, zc, yba, yFloor), nb = SoffitNormal(zb, zc, ybb, yFloor);
 
-        // The soffit is the only curved surface on this panel, so it is the only one given smooth normals; the outer, inner and top faces are planar across the whole sweep and stay flat.
+        // The soffit carries smooth normals because it is a curve; the top does too when it is following one.
         QuadN(b, (Vector3){ x0, yba, za }, (Vector3){ x1, yba, za },
                  (Vector3){ x1, ybb, zb }, (Vector3){ x0, ybb, zb }, na, na, nb, nb);
-        Quad(b, (Vector3){ x0, yta, za }, (Vector3){ x0, ytb, zb },
-                (Vector3){ x1, ytb, zb }, (Vector3){ x1, yta, za });
+        if (topFn) {
+            Vector3 ta = SlopeNormal(topFn, za), tb = SlopeNormal(topFn, zb);
+            QuadN(b, (Vector3){ x0, yta, za }, (Vector3){ x0, ytb, zb },
+                     (Vector3){ x1, ytb, zb }, (Vector3){ x1, yta, za }, ta, tb, tb, ta);
+        } else {
+            Quad(b, (Vector3){ x0, yta, za }, (Vector3){ x0, ytb, zb },
+                    (Vector3){ x1, ytb, zb }, (Vector3){ x1, yta, za });
+        }
         Quad(b, (Vector3){ x1, yba, za }, (Vector3){ x1, yta, za },
                 (Vector3){ x1, ytb, zb }, (Vector3){ x1, ybb, zb });
         Quad(b, (Vector3){ x0, yba, za }, (Vector3){ x0, ybb, zb },
@@ -1065,13 +1126,20 @@ static void GlowDisc(Builder *b, float cx, float cy, float z, float r, float fac
     }
 }
 
-// Height of the front bodywork's top skin at a given z: flat over the hood, falling away over the nose.
-// Anything laid on it asks rather than assuming, which is what keeps the intake and the latch on the surface when the hood's length changes.
+// Height of the front's top skin at a given z. Everything laid on it asks rather than assuming, which is what keeps the intake, the latch and the fender crowns on the surface when the surface changes.
 static float HoodTopY(float z)
 {
-    if (z <= HOOD_FRONT_Z) return HOOD_TOP_Y;
-    return Lerp(HOOD_TOP_Y, NOSE_TOP_Y, (z - HOOD_FRONT_Z) / (2.160f - HOOD_FRONT_Z));
+    float u = Clamp((z - HOOD_BACK_EDGE) / (2.160f - HOOD_BACK_EDGE), 0.0f, 1.0f);
+    // Slope growing linearly from 0.449 of the mean at the rear to 1.551 of it at the front.
+    float f = 0.449f * u + 0.551f * u * u;
+    return HOOD_TOP_Y - (HOOD_TOP_Y - NOSE_TOP_Y) * f;
 }
+
+// The underside of the hood panel, which is also the roof of everything it covers.
+static float HoodUnderY(float z) { return HoodTopY(z) - HOOD_THICK; }
+
+// The fender crown, derived from the skin it runs beside rather than from its own pair of literals, so it falls with the nose instead of staying straight while the nose curves away underneath it.
+static float FenderTopY(float z) { return HoodTopY(z) + FENDER_CROWN; }
 
 static void BuildFront(void)
 {
@@ -1082,22 +1150,18 @@ static void BuildFront(void)
     Builder *lamp = &g->b[MAT_LAMP];
     Builder *amber = &g->b[MAT_AMBER];
 
-    // Engine bay, stopping where the hood does. Forward of that the nose is solid, so there is nothing for a bay roof to be the roof of.
-    Prism(body, -CORE_HW, CORE_HW, HOOD_BACK_Z, HOOD_FRONT_Z, SILL_Y, SILL_Y, HOOD_BASE_Y, HOOD_BASE_Y);
+    // Engine bay, its roof following the underside of the skin the whole way to the grille.
+    CurvedSlab(body, -CORE_HW, CORE_HW, HOOD_BACK_Z, 2.160f, HoodUnderY, NULL, SILL_Y);
 
-    // Hood, a separate slab sitting 20 mm inboard of the fenders so the shut lines read as gaps rather than as a single moulded lump.
-    // Its underside is 10 mm into the bay's roof and its front edge 10 mm into the nose, rather than flush with either. Two faces on exactly the same plane is the defect humvee_v2 shipped four of.
-    Prism(body, -0.660f, 0.660f, 0.740f, HOOD_FRONT_Z, HOOD_BASE_Y - 0.010f, HOOD_BASE_Y - 0.010f, HOOD_TOP_Y, HOOD_TOP_Y);
-
-    // Nose: the panel that falls from the hood's front edge to the top of the grille, and the reason the hood can be short.
-    // Solid from the sill rather than a skin over the bay, so its underside is not a second surface that has to be kept clear of the first.
-    Prism(body, -WELL_IN, WELL_IN, HOOD_FRONT_Z - 0.010f, 2.160f, SILL_Y, SILL_Y, HoodTopY(HOOD_FRONT_Z), HoodTopY(2.160f));
+    // Hood, one panel over the whole front including the nose, which is what the reference shows: the shut line runs fore and aft down each side and around the front corner, and there is no transverse crease.
+    // 20 mm inboard of the fenders so those shut lines read as gaps rather than as a single moulded lump, and 10 mm down into the bay's roof rather than flush with it, since two faces on exactly the same plane is the defect humvee_v2 shipped four of.
+    CurvedSlab(body, -0.660f, 0.660f, HOOD_BACK_EDGE, HOOD_NOSE_Z, HoodTopY, HoodUnderY, 0.0f);
 
     // Hood air intake: a louvred panel with a raised bezel and eight ribs, leaving nine fore-aft slots.
     // Proportioned off references/humvee_v3_anim/ref_09.jpg, a plan view of the hood, and checked head-on against ref_03.jpg: it spans a little over 40 per cent of the hood's width and sits in its forward half.
     {
-        // Placed as a fraction of the hood rather than in absolute z, so it stays on the panel when the panel's length changes.
-        const float pz0 = Lerp(0.740f, HOOD_FRONT_Z, 0.27f), pz1 = Lerp(0.740f, HOOD_FRONT_Z, 0.80f), phw = 0.275f;
+        // Placed as a fraction of the hood rather than in absolute z, so it stays on the panel when the panel changes.
+        const float pz0 = Lerp(HOOD_BACK_EDGE, HOOD_NOSE_Z, 0.28f), pz1 = Lerp(HOOD_BACK_EDGE, HOOD_NOSE_Z, 0.68f), phw = 0.275f;
         float sy0 = HoodTopY(pz0), sy1 = HoodTopY(pz1);
         Prism(dark, -phw, phw, pz0, pz1, sy0, sy1, sy0 + 0.004f, sy1 + 0.004f);
         for (int i = 0; i < 8; i++) {
@@ -1122,12 +1186,10 @@ static void BuildFront(void)
 
     GroupMark m = GroupMarkNow(g);
 
-    // Front fender: full-height slab with the wheel opening cut out below.
-    // In two lengths, because its crown runs flat alongside the hood and only falls once the nose does. The join overlaps by 10 mm rather than abutting, so the two sweeps do not leave a pair of coincident end caps to fight over the same pixels.
-    ArchedPanel(body, WELL_IN, HALF_W, HOOD_BACK_Z, HOOD_FRONT_Z + 0.010f, AXLE_F, SILL_Y, FENDER_Y0, FENDER_Y0);
-    ArchedPanel(body, WELL_IN, HALF_W, HOOD_FRONT_Z, NOSE_Z, AXLE_F, SILL_Y, FENDER_Y0, FENDER_Y1);
-    // Strip between the core and the fender, arched away to open the wheel well. It stops with the hood; the nose panel reaches out to WELL_IN and carries on from there.
-    ArchedPanel(body, CORE_HW, WELL_IN, HOOD_BACK_Z, HOOD_FRONT_Z, AXLE_F, SILL_Y, HOOD_BASE_Y, HOOD_BASE_Y);
+    // Front fender: full-height slab with the wheel opening cut out below, its crown riding the skin's own curve.
+    ArchedPanel(body, WELL_IN, HALF_W, HOOD_BACK_Z, NOSE_Z, AXLE_F, SILL_Y, 0.0f, 0.0f, FenderTopY);
+    // Strip between the core and the fender, arched away to open the wheel well, roofed by the same underside as the bay.
+    ArchedPanel(body, CORE_HW, WELL_IN, HOOD_BACK_Z, 2.160f, AXLE_F, SILL_Y, 0.0f, 0.0f, HoodUnderY);
 
     // Headlight assembly, standing proud of the fender face so it is not swallowed by it.
     // The main lamp is 0.178 across: measured off references/humvee_v3_anim/ref_03.jpg, where it spans 110 px against the 1310 px that carry the vehicle's 2.16 of width.
@@ -1147,8 +1209,9 @@ static void BuildFront(void)
     Box(metal, 0.456f, 0.488f, 0.520f, 0.634f, 2.350f, 2.400f);
     Tube(metal, (Vector3){ 0.362f, 0.566f, 2.382f }, (Vector3){ 0.498f, 0.566f, 2.382f },
          0.017f, 0.017f, 10, true, true);
-    // Hood latch, on the hood's own front corner, so it follows the panel rather than a remembered z.
-    Box(metal, 0.500f, 0.600f, HOOD_TOP_Y - 0.005f, HOOD_TOP_Y + 0.020f, HOOD_FRONT_Z - 0.060f, HOOD_FRONT_Z - 0.010f);
+    // Hood latch, on the hood's own front corner and at the height the skin has reached there.
+    Box(metal, 0.500f, 0.600f, HoodTopY(HOOD_NOSE_Z) - 0.005f, HoodTopY(HOOD_NOSE_Z) + 0.020f,
+        HOOD_NOSE_Z - 0.070f, HOOD_NOSE_Z - 0.020f);
 
     GroupMirrorX(g, m);
 
@@ -1425,8 +1488,8 @@ static void BuildBed(void)
     GroupMark m = GroupMarkNow(g);
 
     // Rear fender flare, wheel opening cut out below, flat shelf on top.
-    ArchedPanel(body, WELL_IN, HALF_W, TAIL_Z, -1.050f, AXLE_R, SILL_Y, FLARE_TOP_Y, FLARE_TOP_Y);
-    ArchedPanel(body, CORE_HW, WELL_IN, TAIL_Z, CAB_BACK_Z, AXLE_R, SILL_Y, BED_FLOOR_Y, BED_FLOOR_Y);
+    ArchedPanel(body, WELL_IN, HALF_W, TAIL_Z, -1.050f, AXLE_R, SILL_Y, FLARE_TOP_Y, FLARE_TOP_Y, NULL);
+    ArchedPanel(body, CORE_HW, WELL_IN, TAIL_Z, CAB_BACK_Z, AXLE_R, SILL_Y, BED_FLOOR_Y, BED_FLOOR_Y, NULL);
     // Bed side wall, stepped inboard above the flare, with a capped top rail and external stiffening ribs.
     Box(body, CAB_IN, SIDE_W, FLARE_TOP_Y, BED_TOP_Y, TAIL_Z, CAB_BACK_Z);
     // Every joint below is given a few millimetres of overlap into its parent rather than meeting it face to face, so no interface is a coincident plane.
@@ -2333,6 +2396,31 @@ static void CheckHalfShaft(void)
     }
 }
 
+// Claim: the front's top skin has the shape the reference has.
+// The six readings are the top line of references/humvee_v3_anim/ref_10.jpg, taken at 403 px/m off the 3.30 m wheelbase and anchored vertically on the axle centre, converted into this file's coordinates. Keeping them here rather than in a comment means a later edit to the curve is told how far it has drifted rather than being trusted.
+// The offset is reported separately from the shape because they are different claims. This model deliberately kept the end heights it already had, so the whole curve sits low by a roughly constant amount; what had to change was where the drop sits along the run, and that is what the spread measures.
+static void CheckHoodProfile(void)
+{
+    static const float REF[][2] = {
+        { 0.853f, 1.208f }, { 1.241f, 1.181f }, { 1.551f, 1.153f },
+        { 1.784f, 1.119f }, { 1.938f, 1.087f }, { 2.032f, 1.064f },
+    };
+    const int N = (int)(sizeof(REF) / sizeof(REF[0]));
+    float sum = 0.0f, lo = 1e9f, hi = -1e9f;
+    for (int i = 0; i < N; i++) {
+        float d = HoodTopY(REF[i][0]) - REF[i][1];
+        sum += d;
+        if (d < lo) lo = d;
+        if (d > hi) hi = d;
+    }
+    float mean = sum / (float)N;
+    TraceLog(LOG_INFO, "humvee_v3_anim: hood skin sits %+.3f m against ref_10, shape within %.3f m of it",
+             mean, hi - lo);
+    if (hi - lo > 0.030f) {
+        TraceLog(LOG_WARNING, "humvee_v3_anim: hood skin is the wrong shape, not merely offset: %.3f m of spread", hi - lo);
+    }
+}
+
 // Claim: dust only ever leaves a tyre that is on the ground, and the plume clears the loop's seam instead of silting up.
 // Also a number worth having: how many puffs are alive at once, since the whole technique rests on many faint ones overlapping rather than a few solid ones.
 static void CheckDust(void)
@@ -2444,6 +2532,7 @@ static void Init(void)
     CheckWiperSweep();
     CheckLoopCloses();
     CheckHalfShaft();
+    CheckHoodProfile();
     CheckDust();
     CheckSuspension();
 }
@@ -2534,15 +2623,27 @@ const Scene SCENE = {
         "binnacle and a padded rail, four seat squabs, a grab handle, and a\n"
         "three-spoke steering wheel of 0.176 m radius on a raked column, on the left.\n"
         "\n"
-        "Corrected against the references: the hood is a short flat panel with the nose\n"
-        "falling away in front of it, not a long lid running flat to the grille.\n"
-        "ref_10.jpg is a near-orthographic side elevation of this variant; scaled by the\n"
-        "3.30 m wheelbase at 403 px/m it puts the flat top at 0.90 m with its front edge\n"
-        "0.10 m ahead of the front axle, and the nose then dropping 0.18 m over 0.35 m.\n"
-        "The hood was 1.46 m ending 0.55 m ahead of the axle, which left the truck no\n"
-        "nose at all; it is now 1.02 m ending 0.11 m ahead of it, with a 0.40 m nose\n"
-        "falling 0.16 m to the top of the grille. The fender crowns run flat alongside\n"
-        "the hood and only fall once the nose does. Still 0.11 m long at the back: the\n"
+        "Corrected against the references: the front's top skin is one continuous curve\n"
+        "from the cowl to the grille, not a flat lid with a ramp on the front of it.\n"
+        "ref_10.jpg is a near-orthographic side elevation of this variant; read at\n"
+        "403 px/m off the 3.30 m wheelbase and anchored on the axle centre, its top line\n"
+        "runs 1.208 m at z = 0.85 down to 1.064 m at z = 2.03, and the local slope over\n"
+        "that goes 4.0, 5.2, 8.3, 11.7, 13.8 degrees. It starts falling at the cowl and\n"
+        "steepens the whole way; there is no flat section and no crease. The skin is\n"
+        "therefore a quadratic whose slope grows linearly, split so the front slope is\n"
+        "3.45 times the rear one. Both ends keep the heights this file already had,\n"
+        "since the mean slope was already right to three per cent -- what was wrong was\n"
+        "where the drop sat, not how much there was -- so the curve sits a near-constant\n"
+        "0.054 m below the reference and matches its shape to within 0.020 m, which\n"
+        "CheckHoodProfile measures at build time against the six readings themselves.\n"
+        "The hood is one panel over the whole front, nose included, with the shut line\n"
+        "running fore and aft down each side; the fender crowns are derived from the\n"
+        "skin plus 0.060 m, so they fall with the nose instead of staying straight while\n"
+        "it curves away underneath them. An earlier reading off ref_07.jpg said flat\n"
+        "then 27 degrees; that image is 406 px wide and cannot separate a gentle curve\n"
+        "from a flat panel with a crease in it.\n"
+        "\n"
+        "Still long at the back: the\n"
         "same elevation puts the windscreen base 0.80 m behind the front axle where this\n"
         "model has it at 0.91, which is part of a wider finding that the axles sit about\n"
         "0.23 m too far back within the body -- ref_10 gives a front overhang of 0.46 m\n"
