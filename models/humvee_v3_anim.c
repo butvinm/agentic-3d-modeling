@@ -862,6 +862,7 @@ static Group gHull, gFront, gCab, gInterior, gBed, gSusp;
 static Group gWheel[CORNERS];    // tyre, rim, lug nuts: translates with the suspension and spins
 static Group gUpright[CORNERS];  // hub carrier, wishbones, lower spring seat: translates only
 static Group gSpring[CORNERS];   // coil and damper: compress between the body and the upright
+static Group gShaft[CORNERS];    // half shaft: swings on its inboard joint to follow the hub
 static Group gWiper[2];
 static Group gAntenna;
 
@@ -1478,7 +1479,8 @@ static void AntennaSetBend(float bendX, float bendZ)
 // The wheel spins about its hub and rides the suspension. The upright -- hub carrier, wishbones, lower spring seat -- rides the suspension without spinning. The coil and damper stand between the two, so they change length instead of moving.
 // What stays with the body is only the differentials and the half shafts, in gSusp.
 //
-// The wishbones translate with the wheel rather than swinging about their inboard pivots, which is wrong by the travel at their inboard ends. That end is the one place it does not show: at the front axle the upper arm runs from x = 0.24 to 0.76 at y = 0.63, entirely inside the engine bay block, and at the rear inside the bed's core. The lower arm sits below the belly pan, where it is only visible from underneath and meets nothing. The measured worst case is printed by CheckSuspension.
+// The half shafts do swing: each is its own node, hinged on its inboard joint at the differential and rotated so its outer end lands on the travelling hub. They were rigid to the chassis in the first draft of this file, which left the outer end up to 0.110 m away from the carrier it drives; renders/humvee_v3_anim/v1/critique.md caught it.
+// The wishbones do not, and translate with the wheel instead, which is wrong by the travel at their inboard ends. That end is the one place it does not show: at the front axle the upper arm runs from x = 0.24 to 0.76 at y = 0.63, entirely inside the engine bay block, and at the rear inside the bed's core. The lower arm sits below the belly pan, where it is only visible from underneath and meets nothing. The measured worst case is printed by CheckSuspension.
 // ---------------------------------------------------------------------------
 
 // Half-section of a 37x12.5R16.5, walked from the inboard bead round the tread to the outboard bead.
@@ -1565,7 +1567,21 @@ static void BuildSpring(Group *g, float zc, bool left)
     GroupFinish(g, "spring");
 }
 
-// What is bolted to the body: the differentials, the half shafts out to the hubs, and the upper mounts the coil and damper hang from.
+// Half shaft, from the differential's output joint out to the hub carrier.
+// It is built along the corner's own side rather than mirrored, because Tube takes its winding from the direction it is given and so needs no reflecting.
+#define SHAFT_IN   0.170f
+// 10 mm short of the hub carrier's outer face at 0.800, so the shaft's end cap is buried in it rather than flush with it. Flush is how humvee_v2 ended up with four joints on exactly coincident planes.
+#define SHAFT_OUT  0.790f
+#define SHAFT_LEN  (SHAFT_OUT - SHAFT_IN)
+
+static void BuildShaft(Group *g, float side, float zc)
+{
+    Tube(&g->b[MAT_METAL], (Vector3){ side * SHAFT_IN, AXLE_Y, zc }, (Vector3){ side * SHAFT_OUT, AXLE_Y, zc },
+         0.036f, 0.036f, 10, true, true);
+    GroupFinish(g, "shaft");
+}
+
+// What is bolted to the body: the differentials and the upper mounts the coil and damper hang from.
 static void BuildSusp(void)
 {
     Group *g = &gSusp;
@@ -1574,7 +1590,6 @@ static void BuildSusp(void)
     GroupMark m = GroupMarkNow(g);
     for (int c = 0; c < 2; c++) {
         float zc = (c == 0) ? AXLE_F : AXLE_R;
-        Tube(metal, (Vector3){ 0.160f, AXLE_Y, zc }, (Vector3){ 0.800f, AXLE_Y, zc }, 0.036f, 0.036f, 10, true, true);
         Box(metal, 0.560f, 0.740f, COIL_TOP_Y, 0.995f, zc + 0.100f, zc + 0.260f);
         Box(metal, 0.520f, 0.640f, COIL_TOP_Y, 1.005f, zc - 0.235f, zc - 0.145f);
     }
@@ -1811,6 +1826,13 @@ static void Update(float t)
             MatrixMultiply(MatrixRotateX(p.spin), MatrixTranslate(hub.x, hub.y + p.travel[i], hub.z)),
             p.chassis);
         // Scaling about the upper mount is what shortens the coil and the damper; raylib rebuilds matNormal from the model matrix, so the non-uniform scale does not wreck their shading.
+        // The shaft hinges at the differential, so its outer end rises with the hub; a rigid swing leaves the end 3 mm short in x of where it started, which is inside the hub carrier.
+        float swing = CornerSide(i) * asinf(Clamp(p.travel[i] / SHAFT_LEN, -1.0f, 1.0f));
+        Vector3 joint = { CornerSide(i) * SHAFT_IN, AXLE_Y, CornerZ(i) };
+        gShaft[i].xform = MatrixMultiply(MatrixMultiply(
+            MatrixMultiply(MatrixTranslate(-joint.x, -joint.y, -joint.z), MatrixRotateZ(swing)),
+            MatrixTranslate(joint.x, joint.y, joint.z)), p.chassis);
+
         float k = (COIL_LEN - p.travel[i]) / COIL_LEN;
         gSpring[i].xform = MatrixMultiply(MatrixMultiply(
             MatrixMultiply(MatrixTranslate(0.0f, -COIL_TOP_Y, 0.0f), MatrixScale(1.0f, k, 1.0f)),
@@ -1846,7 +1868,7 @@ static Group *PART_INTERIOR[] = { &gInterior };
 static Group *PART_BED[]      = { &gBed };
 static Group *PART_WIPERS[]   = { &gWiper[0], &gWiper[1] };
 static Group *PART_ANTENNA[]  = { &gAntenna };
-static Group *PART_GEAR[13];
+static Group *PART_GEAR[17];
 
 #define COUNT_OF(a) ((int)(sizeof(a) / sizeof((a)[0])))
 
@@ -2002,6 +2024,29 @@ static void CheckLoopCloses(void)
     }
 }
 
+// Claim: each half shaft's outer end stays inside the hub carrier it drives, at every point of the travel. This is the joint renders/humvee_v3_anim/v1/critique.md found open, so it is measured rather than argued.
+static void CheckHalfShaft(void)
+{
+    float worst = 1e9f;
+    for (int k = 0; k < 720; k++) {
+        Pose p = PoseFor(CYCLE * (float)k / 720.0f);
+        for (int i = 0; i < CORNERS; i++) {
+            // Measured on the right-hand side; the left is the same swing reflected, so its end lands at the same distance from its own carrier.
+            float swing = asinf(Clamp(p.travel[i] / SHAFT_LEN, -1.0f, 1.0f));
+            float ex = SHAFT_IN + SHAFT_LEN * cosf(swing);
+            float ey = AXLE_Y + p.travel[i];
+            // Depth of that point inside the carrier box, which itself has moved by the same travel.
+            float d = fminf(fminf(ex - 0.700f, 0.800f - ex),
+                            fminf(ey - (0.320f + p.travel[i]), (0.660f + p.travel[i]) - ey));
+            if (d < worst) worst = d;
+        }
+    }
+    TraceLog(LOG_INFO, "humvee_v3_anim: half shaft end sits %.3f m inside the hub carrier at worst", worst);
+    if (worst < 0.0f) {
+        TraceLog(LOG_WARNING, "humvee_v3_anim: half shaft end leaves the hub carrier by %.3f m", -worst);
+    }
+}
+
 // Not a claim so much as a number on the record: the wishbones translate with their wheel rather than swinging, so this is how far their inboard ends move from where they are bolted.
 static void CheckSuspension(void)
 {
@@ -2039,6 +2084,7 @@ static void Init(void)
         BuildWheelDisc(&gWheel[i], left);
         BuildUpright(&gUpright[i], CornerZ(i), left);
         BuildSpring(&gSpring[i], CornerZ(i), left);
+        BuildShaft(&gShaft[i], CornerSide(i), CornerZ(i));
     }
     BuildWiper(&gWiper[0], WIPER_PIVOT_X);
     BuildWiper(&gWiper[1], -WIPER_PIVOT_X);
@@ -2055,9 +2101,11 @@ static void Init(void)
     for (int i = 0; i < CORNERS; i++) {
         GroupRegister(&gUpright[i]);
         GroupRegister(&gSpring[i]);
+        GroupRegister(&gShaft[i]);
         GroupRegister(&gWheel[i]);
         PART_GEAR[n++] = &gUpright[i];
         PART_GEAR[n++] = &gSpring[i];
+        PART_GEAR[n++] = &gShaft[i];
         PART_GEAR[n++] = &gWheel[i];
     }
     GroupRegister(&gWiper[0]);
@@ -2077,6 +2125,7 @@ static void Init(void)
     CheckGroundContact();
     CheckWiperSweep();
     CheckLoopCloses();
+    CheckHalfShaft();
     CheckSuspension();
 }
 
@@ -2142,15 +2191,16 @@ const Scene SCENE = {
         "is the one pane that should not be.\n"
         "\n"
         "Rigid nodes only, since skinning needs bone attributes the harness's shader\n"
-        "does not declare. Twenty-one of them: five body groups plus the differentials\n"
-        "and half shafts on the chassis matrix; per corner a wheel that spins and\n"
-        "travels, an upright that only travels, and a coil-and-damper pair scaled about\n"
-        "its upper mount so it shortens as the suspension compresses; two wipers, each\n"
-        "turning about its own pivot because two arms rotating by one angle about two\n"
-        "different points is not a rigid motion; and the antenna. The wishbones travel\n"
-        "with their wheel rather than swinging about their inboard pivots, which is\n"
-        "wrong by the travel at the inboard end -- that end is inside the engine bay\n"
-        "block at the front and the bed core at the rear, or under the belly pan.\n"
+        "does not declare. Twenty-five of them: five body groups plus the differentials\n"
+        "and the spring and damper top mounts on the chassis matrix; per corner a wheel\n"
+        "that spins and travels, an upright that only travels, a coil-and-damper pair\n"
+        "scaled about its upper mount so it shortens as the suspension compresses, and a\n"
+        "half shaft hinged at the differential so its outer end follows the hub; two\n"
+        "wipers, each turning about its own pivot because two arms rotating by one angle\n"
+        "about two different points is not a rigid motion; and the antenna. The\n"
+        "wishbones are the one thing that translates with its wheel rather than swinging,\n"
+        "which is wrong by the travel at the inboard end -- that end is inside the engine\n"
+        "bay block at the front and the bed core at the rear, or under the belly pan.\n"
         "\n"
         "The antenna is the one surface that deforms. Its mesh is uploaded dynamic and\n"
         "its vertices and normals are rewritten every frame from a cantilever clamped\n"
