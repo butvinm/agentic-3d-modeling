@@ -7,3 +7,4 @@ ref_06.jpg	https://commons.wikimedia.org/wiki/Special:FilePath/AM%20General%20M1
 ref_07.jpg	https://commons.wikimedia.org/wiki/Special:FilePath/HMMWV%20armament%20carrier%20M1025.jpg
 ref_08.jpg	https://upload.wikimedia.org/wikipedia/commons/b/b5/M_998_w.MG_2.jpg
 ref_09.jpg	https://upload.wikimedia.org/wikipedia/commons/6/68/Two_camoflagued_HMMWV_bonnets.jpg
+ref_10.jpg	supplied directly by the user in session, 2026-08-03: side elevation of an M998 cargo/troop carrier, near-orthographic

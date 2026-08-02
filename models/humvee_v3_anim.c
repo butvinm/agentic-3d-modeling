@@ -922,12 +922,15 @@ static void GroupUnload(Group *g)
 #define BED_FLOOR_Y   1.100f
 #define BED_TOP_Y     1.420f
 #define FLARE_TOP_Y   1.160f
-#define FENDER_Y0     1.220f   // front fender crown at the cowl
-#define FENDER_Y1     1.120f   // ... and at the nose
-#define HOOD_TOP_Y0   1.160f
-#define HOOD_TOP_Y1   1.060f
-#define HOOD_BASE_Y0  1.100f
-#define HOOD_BASE_Y1  1.000f
+#define FENDER_Y0     1.220f   // front fender crown, flat alongside the hood
+#define FENDER_Y1     1.120f   // ... and where it falls away over the nose
+// The hood is a short flat panel, and forward of it the nose falls away to the grille.
+// Measured off references/humvee_v3_anim/ref_10.jpg, a near-orthographic side elevation of the cargo variant, scaled by the 3.30 m wheelbase at 403 px/m: the flat top runs 0.90 m and its front edge sits 0.10 m ahead of the front axle, with the nose then dropping 0.18 m over 0.35 m, about 27 degrees.
+// It used to be 1.46 m of gently sloping lid running flat to the grille, which is 0.45 m too far forward at the front and leaves the truck no nose at all.
+#define HOOD_FRONT_Z  1.760f
+#define HOOD_TOP_Y    1.160f
+#define HOOD_BASE_Y   1.100f
+#define NOSE_TOP_Y    1.000f   // top of the grille, where the nose slope lands
 
 // Suspension travel about the static ride height, and the free length of the coil the travel compresses.
 #define SUSP_UP       0.110f   // hub rising towards the body
@@ -1062,10 +1065,12 @@ static void GlowDisc(Builder *b, float cx, float cy, float z, float r, float fac
     }
 }
 
-// Height of the hood's top skin at a given z. The slab is laid between two heights over its length, so anything sitting on it has to ask rather than assume a flat surface.
+// Height of the front bodywork's top skin at a given z: flat over the hood, falling away over the nose.
+// Anything laid on it asks rather than assuming, which is what keeps the intake and the latch on the surface when the hood's length changes.
 static float HoodTopY(float z)
 {
-    return Lerp(HOOD_TOP_Y0, HOOD_TOP_Y1, (z - 0.740f) / (2.200f - 0.740f));
+    if (z <= HOOD_FRONT_Z) return HOOD_TOP_Y;
+    return Lerp(HOOD_TOP_Y, NOSE_TOP_Y, (z - HOOD_FRONT_Z) / (2.160f - HOOD_FRONT_Z));
 }
 
 static void BuildFront(void)
@@ -1077,20 +1082,22 @@ static void BuildFront(void)
     Builder *lamp = &g->b[MAT_LAMP];
     Builder *amber = &g->b[MAT_AMBER];
 
-    const float bayEnd = Lerp(HOOD_BASE_Y0, HOOD_BASE_Y1, (2.160f - HOOD_BACK_Z) / (NOSE_Z - HOOD_BACK_Z));
-
-    // Engine bay, stopping short of the nose to leave room for the grille.
-    Prism(body, -CORE_HW, CORE_HW, HOOD_BACK_Z, 2.160f, SILL_Y, SILL_Y, HOOD_BASE_Y0, bayEnd);
+    // Engine bay, stopping where the hood does. Forward of that the nose is solid, so there is nothing for a bay roof to be the roof of.
+    Prism(body, -CORE_HW, CORE_HW, HOOD_BACK_Z, HOOD_FRONT_Z, SILL_Y, SILL_Y, HOOD_BASE_Y, HOOD_BASE_Y);
 
     // Hood, a separate slab sitting 20 mm inboard of the fenders so the shut lines read as gaps rather than as a single moulded lump.
-    Prism(body, -0.660f, 0.660f, 0.740f, 2.200f,
-          Lerp(HOOD_BASE_Y0, HOOD_BASE_Y1, 0.013f), Lerp(HOOD_BASE_Y0, HOOD_BASE_Y1, 0.987f),
-          Lerp(HOOD_TOP_Y0, HOOD_TOP_Y1, 0.013f), Lerp(HOOD_TOP_Y0, HOOD_TOP_Y1, 0.987f));
+    // Its underside is 10 mm into the bay's roof and its front edge 10 mm into the nose, rather than flush with either. Two faces on exactly the same plane is the defect humvee_v2 shipped four of.
+    Prism(body, -0.660f, 0.660f, 0.740f, HOOD_FRONT_Z, HOOD_BASE_Y - 0.010f, HOOD_BASE_Y - 0.010f, HOOD_TOP_Y, HOOD_TOP_Y);
+
+    // Nose: the panel that falls from the hood's front edge to the top of the grille, and the reason the hood can be short.
+    // Solid from the sill rather than a skin over the bay, so its underside is not a second surface that has to be kept clear of the first.
+    Prism(body, -WELL_IN, WELL_IN, HOOD_FRONT_Z - 0.010f, 2.160f, SILL_Y, SILL_Y, HoodTopY(HOOD_FRONT_Z), HoodTopY(2.160f));
 
     // Hood air intake: a louvred panel with a raised bezel and eight ribs, leaving nine fore-aft slots.
     // Proportioned off references/humvee_v3_anim/ref_09.jpg, a plan view of the hood, and checked head-on against ref_03.jpg: it spans a little over 40 per cent of the hood's width and sits in its forward half.
     {
-        const float pz0 = 1.280f, pz1 = 1.860f, phw = 0.275f;
+        // Placed as a fraction of the hood rather than in absolute z, so it stays on the panel when the panel's length changes.
+        const float pz0 = Lerp(0.740f, HOOD_FRONT_Z, 0.27f), pz1 = Lerp(0.740f, HOOD_FRONT_Z, 0.80f), phw = 0.275f;
         float sy0 = HoodTopY(pz0), sy1 = HoodTopY(pz1);
         Prism(dark, -phw, phw, pz0, pz1, sy0, sy1, sy0 + 0.004f, sy1 + 0.004f);
         for (int i = 0; i < 8; i++) {
@@ -1104,21 +1111,23 @@ static void BuildFront(void)
     }
 
     // Grille surround and slats.
-    Box(body, -WELL_IN, -0.600f, SILL_Y, HOOD_BASE_Y1, 2.160f, NOSE_Z);
-    Box(body, 0.600f, WELL_IN, SILL_Y, HOOD_BASE_Y1, 2.160f, NOSE_Z);
+    Box(body, -WELL_IN, -0.600f, SILL_Y, NOSE_TOP_Y, 2.160f, NOSE_Z);
+    Box(body, 0.600f, WELL_IN, SILL_Y, NOSE_TOP_Y, 2.160f, NOSE_Z);
     Box(body, -0.600f, 0.600f, SILL_Y, 0.660f, 2.160f, NOSE_Z);
-    Box(dark, -0.600f, 0.600f, 0.660f, HOOD_BASE_Y1, 2.130f, 2.170f);
+    Box(dark, -0.600f, 0.600f, 0.660f, NOSE_TOP_Y, 2.130f, 2.170f);
     for (int i = 0; i < 8; i++) {
         float cx = -0.525f + 0.150f * (float)i;
-        Box(body, cx - 0.050f, cx + 0.050f, 0.660f, HOOD_BASE_Y1, 2.170f, 2.215f);
+        Box(body, cx - 0.050f, cx + 0.050f, 0.660f, NOSE_TOP_Y, 2.170f, 2.215f);
     }
 
     GroupMark m = GroupMarkNow(g);
 
     // Front fender: full-height slab with the wheel opening cut out below.
-    ArchedPanel(body, WELL_IN, HALF_W, HOOD_BACK_Z, NOSE_Z, AXLE_F, SILL_Y, FENDER_Y0, FENDER_Y1);
-    // Strip between the core and the fender, arched away to open the wheel well.
-    ArchedPanel(body, CORE_HW, WELL_IN, HOOD_BACK_Z, 2.160f, AXLE_F, SILL_Y, HOOD_BASE_Y0, bayEnd);
+    // In two lengths, because its crown runs flat alongside the hood and only falls once the nose does. The join overlaps by 10 mm rather than abutting, so the two sweeps do not leave a pair of coincident end caps to fight over the same pixels.
+    ArchedPanel(body, WELL_IN, HALF_W, HOOD_BACK_Z, HOOD_FRONT_Z + 0.010f, AXLE_F, SILL_Y, FENDER_Y0, FENDER_Y0);
+    ArchedPanel(body, WELL_IN, HALF_W, HOOD_FRONT_Z, NOSE_Z, AXLE_F, SILL_Y, FENDER_Y0, FENDER_Y1);
+    // Strip between the core and the fender, arched away to open the wheel well. It stops with the hood; the nose panel reaches out to WELL_IN and carries on from there.
+    ArchedPanel(body, CORE_HW, WELL_IN, HOOD_BACK_Z, HOOD_FRONT_Z, AXLE_F, SILL_Y, HOOD_BASE_Y, HOOD_BASE_Y);
 
     // Headlight assembly, standing proud of the fender face so it is not swallowed by it.
     // The main lamp is 0.178 across: measured off references/humvee_v3_anim/ref_03.jpg, where it spans 110 px against the 1310 px that carry the vehicle's 2.16 of width.
@@ -1138,8 +1147,8 @@ static void BuildFront(void)
     Box(metal, 0.456f, 0.488f, 0.520f, 0.634f, 2.350f, 2.400f);
     Tube(metal, (Vector3){ 0.362f, 0.566f, 2.382f }, (Vector3){ 0.498f, 0.566f, 2.382f },
          0.017f, 0.017f, 10, true, true);
-    // Hood latch, sitting on the sloped hood skin near its front corner.
-    Box(metal, 0.500f, 0.600f, 1.055f, 1.080f, 2.140f, 2.190f);
+    // Hood latch, on the hood's own front corner, so it follows the panel rather than a remembered z.
+    Box(metal, 0.500f, 0.600f, HOOD_TOP_Y - 0.005f, HOOD_TOP_Y + 0.020f, HOOD_FRONT_Z - 0.060f, HOOD_FRONT_Z - 0.010f);
 
     GroupMirrorX(g, m);
 
@@ -2525,7 +2534,22 @@ const Scene SCENE = {
         "binnacle and a padded rail, four seat squabs, a grab handle, and a\n"
         "three-spoke steering wheel of 0.176 m radius on a raked column, on the left.\n"
         "\n"
-        "Corrected against the references: the wipers are top-mounted, hung from the\n"
+        "Corrected against the references: the hood is a short flat panel with the nose\n"
+        "falling away in front of it, not a long lid running flat to the grille.\n"
+        "ref_10.jpg is a near-orthographic side elevation of this variant; scaled by the\n"
+        "3.30 m wheelbase at 403 px/m it puts the flat top at 0.90 m with its front edge\n"
+        "0.10 m ahead of the front axle, and the nose then dropping 0.18 m over 0.35 m.\n"
+        "The hood was 1.46 m ending 0.55 m ahead of the axle, which left the truck no\n"
+        "nose at all; it is now 1.02 m ending 0.11 m ahead of it, with a 0.40 m nose\n"
+        "falling 0.16 m to the top of the grille. The fender crowns run flat alongside\n"
+        "the hood and only fall once the nose does. Still 0.11 m long at the back: the\n"
+        "same elevation puts the windscreen base 0.80 m behind the front axle where this\n"
+        "model has it at 0.91, which is part of a wider finding that the axles sit about\n"
+        "0.23 m too far back within the body -- ref_10 gives a front overhang of 0.46 m\n"
+        "and a rear of 0.78 against this model's 0.70 and 0.57, on a length and\n"
+        "wheelbase that are both right.\n"
+        "\n"
+        "The wipers are top-mounted, hung from the\n"
         "header, and the two arms are parallel rather than mirrored, both leaning\n"
         "towards the vehicle's right. ref_04.jpg looks into the windscreen and shows\n"
         "both pivots on the upper frame at |x| = 0.46 with the blades hanging down\n"
