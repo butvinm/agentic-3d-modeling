@@ -1228,7 +1228,8 @@ static void Unload(void)
     GroupUnload(&gCab);
     GroupUnload(&gBed);
     GroupUnload(&gGear);
-    // After the models: UnloadModel would otherwise free a material map pointing at a texture that is already gone.
+    // UnloadModel frees a material's maps array but deliberately not the textures in it, since they may be shared; vendor/raylib/src/rmodels.c:1200 says so and leaves them to the caller.
+    // They are shared here, one set across all five groups, so they are freed once and only here.
     UnloadTextures();
 }
 
