@@ -2,3 +2,7 @@ build/
 renders/
 *.o
 *.a
+references/**/*.jpg
+references/**/*.jpeg
+references/**/*.png
+references/**/*.webp

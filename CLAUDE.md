@@ -80,6 +80,21 @@ If `.draw` is NULL the harness draws every part in order, so a part-based model 
 
 Prefer parts over separate model files once a model has more than two or three distinct pieces: parts keep shared constants and helpers in one translation unit, and give the review loop a way to look at one piece at a time.
 
+## References come first
+
+**When a model copies a real object, gather reference images before writing any geometry.** Without them you will invent the shape from memory, defend the invention when it is questioned, and be wrong without ever knowing it. This is not hypothetical: an earlier session modelled a HMMWV, had Codex flag its door and cab geometry in three consecutive review rounds, and dismissed it every time on the claim that the shape was "true of the real M998". That session made 114 tool calls and not one reference lookup.
+
+```sh
+tools/reference.sh humvee_v2 <image-url> <image-url> ...   # download, verify, record provenance
+tools/reference.sh humvee_v2 --list
+```
+
+Find candidate images with WebSearch, then pass the image URLs to the script: it downloads them into `references/<model>/`, verifies each really decodes as an image rather than trusting the URL suffix, and appends the source URL to `references/<model>/sources.txt`. Then **Read the saved images** before modelling: seeing them is the point, saving them is only the means.
+
+Get views that answer the questions geometry actually poses: a straight side elevation, a front and rear elevation, and a three-quarter view. A single hero shot will not tell you where a pillar meets a door.
+
+`tools/review.sh` attaches everything in `references/<model>/` to the Codex review automatically and tells it to trust the references over the description. With no references saved it instead instructs Codex not to assert what the real object looks like, and prints a warning.
+
 ## Writing models
 
 **Build meshes, do not use `DrawSphere`/`DrawCylinder`/`DrawCapsule`.** In raylib 5.5 only `DrawCube` and `DrawPlane` emit vertex normals in immediate mode (verify with `grep -n rlNormal3f vendor/raylib/src/rmodels.c`). Every other immediate-mode 3D primitive leaves a stale normal in the batch, so under the lighting shader it shades as garbage. Generate a `Mesh` by hand or with `GenMeshSphere`/`GenMeshCylinder`/`GenMeshTorus`/`GenMeshKnot`, wrap it in `LoadModelFromMesh`, and draw with `DrawModel` or `DrawModelEx`.
@@ -112,10 +127,13 @@ The prompt puts lighting, exposure, contrast, colour washout, background and ant
 
 **Treat the critique as evidence, not instruction, and sort findings before acting:**
 
-- **Falsifiable claims** (self-intersection, clearance, gaps, inverted faces, wrong dimensions) must be checked before any code changes. Computing the answer is cheap and Codex is judging from a handful of static views. A prior run claimed a pinched or terminated tube in `models/torus_knot.c`; measuring the curve's minimum non-local self-distance gave 2.05 against the 0.90 the tube radius required, so the geometry was fine and the apparent defect was occlusion.
-- **Judgement calls** (proportion, silhouette readability, whether it reads as the intended object) cannot be computed. Act on them if you agree, and say that you are taking them on trust.
+- **Mesh claims** (self-intersection, clearance, gaps, inverted faces, wrong dimensions) must be checked before any code changes. Computing the answer is cheap and Codex is judging from a handful of static views. A prior run claimed a pinched or terminated tube in `models/torus_knot.c`; measuring the curve's minimum non-local self-distance gave 2.05 against the 0.90 the tube radius required, so the geometry was fine and the apparent defect was occlusion.
+- **Fidelity claims** (this is not the shape the real object has) are equally falsifiable, but against a reference image rather than the mesh. Check them by looking at `references/<model>/`, and if the needed view is missing, go and get it. **Never settle a fidelity question from memory.** Your recollection of a vehicle you have never measured is not evidence, and asserting it as fact is exactly how a real defect survived three review rounds here.
+- **Judgement calls** (proportion, how the form reads) cannot be settled either way. Act on them if you agree, and say that you are taking them on trust.
 
-Report which findings were verified, which were rejected and why, and which were accepted as judgement. A rejected finding is a useful result, not a failure: silently implementing a wrong critique is how the loop degrades.
+**A finding that survives two or more rounds must be fixed or refuted with evidence.** Re-dismissing it on the same unverified reasoning that failed last round is not a refutation. `tools/review.sh` prints the earlier critique paths after each run: read them, and treat any finding that keeps coming back as more likely to be real, not less. Repetition across independent rounds is signal.
+
+Report which findings were verified, which were rejected and why, and which were accepted as judgement. A rejected finding is a useful result, not a failure: silently implementing a wrong critique is how the loop degrades. But record the evidence for a rejection, so the next round can check the reasoning instead of repeating it.
 
 ## Conventions
 

@@ -37,6 +37,32 @@ IMAGES=()
 for shot in "$OUT"/*.png; do IMAGES+=(-i "$shot"); done
 [ ${#IMAGES[@]} -gt 0 ] || { echo "no renders produced" >&2; exit 1; }
 
+REFS=()
+while IFS= read -r ref; do REFS+=("$ref"); IMAGES+=(-i "$ref"); done < <(
+    find "references/$MODEL" -maxdepth 1 -type f \( -name '*.png' -o -name '*.jpg' -o -name '*.webp' \) 2>/dev/null | sort
+)
+
+REF_NOTE=""
+if [ ${#REFS[@]} -gt 0 ]; then
+    REF_NOTE="
+The last ${#REFS[@]} attached image(s) are NOT renders. They are reference
+photographs of the real object this model is copying. Compare the renders
+against them and report where the model's shape departs from the real thing.
+Trust the references over the description if they disagree."
+else
+    REF_NOTE="
+No reference images were supplied. Do not invent details of the real object
+from memory: if a fidelity question matters here, say which reference view the
+author needs to obtain rather than asserting what the real thing looks like."
+fi
+
+PRIOR=""
+for old in "$BASE"/v*/critique.md; do
+    [ -e "$old" ] || continue
+    [ "$old" = "$OUT/critique.md" ] && continue
+    PRIOR="$PRIOR $old"
+done
+
 read -r -d '' PROMPT <<EOF || true
 You are reviewing a 3D model built procedurally with raylib in C.
 
@@ -46,6 +72,8 @@ angles around it. The grid squares are 1 world unit.
 $( [ -f "$OUT/description.txt" ] && echo "
 What the model is meant to be:
 $(cat "$OUT/description.txt")" )
+
+$REF_NOTE
 
 Out of scope, do not report: lighting, exposure, contrast, shadow darkness,
 colour washout, background, antialiasing and image resolution. All of these
@@ -61,14 +89,33 @@ In scope:
    normals, faceting caused by too few subdivisions, smoothing seams. Judge the
    mesh, not the lights.
 
-Separate what you can prove from what you are inferring. For each finding say
-whether it is a measurable geometry claim the author can verify in the source,
-or a judgement about how the form reads. Be specific: name the angle and the
-region of the image. Rank findings by how much they hurt the model. If something
-looks correct, say so plainly instead of inventing problems. Do not write or
-rewrite code; describe what is wrong and what should change. $EXTRA
+State every finding physically before you interpret it. Open each one with a
+plain sentence naming the parts involved and what they are visibly doing wrong,
+as you would point it out to someone standing next to you: "the door sticks out
+from behind the windscreen", "the mirror arm ends in mid-air short of the body",
+"the rear wheel sits higher off the ground than the front". Only after that
+sentence may you explain what it makes the model read as. A finding whose
+headline is an impression rather than a physical description, such as "the
+silhouette reads as a generic pickup" or "the form lacks character", is not
+usable: the author cannot act on it. If that is genuinely all you see, name the
+specific edges, panels or gaps that produce the impression.
+
+Separate what you can prove from what you are inferring. Label each finding as
+one of: a measurable claim about the mesh that the author can check in the
+source; a fidelity claim about the real object being modelled, which the author
+must check against a reference image; or a judgement about how the form reads.
+Be specific: name the angle and the region of the image. Rank findings by how
+much they hurt the model. If something looks correct, say so plainly instead of
+inventing problems. Do not write or rewrite code; describe what is wrong and
+what should change. $EXTRA
 EOF
 
 printf '%s' "$PROMPT" | codex exec --sandbox read-only -o "$OUT/critique.md" "${IMAGES[@]}"
 echo
 echo "renders + critique: $OUT"
+[ ${#REFS[@]} -gt 0 ] && echo "compared against ${#REFS[@]} reference image(s) in references/$MODEL" \
+                      || echo "NO reference images: run tools/reference.sh $MODEL <url> before trusting any fidelity claim"
+if [ -n "$PRIOR" ]; then
+    echo "earlier critiques:$PRIOR"
+    echo "a finding that also appears in those must be fixed or refuted with evidence, not dismissed again"
+fi
