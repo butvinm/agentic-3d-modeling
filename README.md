@@ -1,6 +1,8 @@
 # Rendering
 
-Models: `ak47`, `crank_slider`, `humvee`, `humvee_v2`, `humvee_v3`, `penguin`, `torus_knot`.
+Models: `ak47`, `ak47_anim`, `crank_slider`, `humvee`, `humvee_v2`, `humvee_v3`, `penguin`, `torus_knot`.
+
+`crank_slider` and `ak47_anim` are posed; the rest are static.
 
 `humvee_v3` is `humvee_v2`'s geometry surfaced with procedural camouflage and with lit lamps. `humvee_v2` stays flat-shaded, because a critique has to read form from shading and camouflage is what most gets in the way of that.
 
@@ -28,6 +30,18 @@ make build/penguin                   # one model
 ```
 
 `--anim` holds the camera and steps the pose through one cycle. Without it the frames orbit a frozen pose.
+
+`--frames` should suit what the model does. `ak47_anim` fires three rounds and puts each ignition on a fifth of its cycle, so any multiple of 5 lands a frame on all three muzzle flashes and 8 will catch only the first.
+
+### Playing the frames back
+
+`--anim` samples N evenly spaced phases, so **the frames do not depend on the model's playback speed at all** - a scene's `duration` scales only the interactive window. How fast a rendered sequence looks is set entirely by the frame rate you play it at:
+
+```sh
+ffmpeg -framerate 30 -i renders/ak47_anim/v1/ak47_anim_%02d.png -c:v libx264 -pix_fmt yuv420p burst.mp4
+```
+
+Real speed is `frames / (seconds of real time in one cycle)`. `ak47_anim`'s cycle is 0.5 s of real time, so 15 frames want 30 fps and 30 frames want 60 fps; half that fps is half speed.
 
 ## Render and critique with Codex
 
