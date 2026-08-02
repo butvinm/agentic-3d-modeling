@@ -401,13 +401,15 @@ static void GroupUnload(Group *g)
 #define BUMP_R_Z     -2.220f
 #define COWL_Z        0.620f
 #define COWL_Y        1.220f
-#define WS_TOP_Z      0.060f
-#define WS_TOP_Y      1.780f
+#define WS_TOP_Z      0.065f   // 0.555 forward of the cowl for a 0.555 rise: 45 degrees exactly
+#define WS_TOP_Y      1.775f
 #define CAB_BACK_Z   -1.150f
-#define ROOF_Y        1.800f
-#define BELT_Y        1.420f
-#define GLASS_Y0      1.450f
-#define GLASS_Y1      1.700f
+#define ROOF_Y        1.830f
+#define RAIL_Y        1.775f   // underside of the roof slab and of the side rails
+#define DOOR_TOP_Y    1.765f
+#define BELT_Y        1.370f
+#define GLASS_Y0      1.400f
+#define GLASS_Y1      1.735f
 #define BED_FLOOR_Y   1.100f
 #define BED_TOP_Y     1.420f
 #define FLARE_TOP_Y   1.160f
@@ -513,7 +515,7 @@ static void BuildFront(void)
     Box(dark, -0.600f, 0.600f, 0.660f, HOOD_BASE_Y1, 2.130f, 2.170f);
     for (int i = 0; i < 8; i++) {
         float cx = -0.525f + 0.150f * (float)i;
-        Box(body, cx - 0.036f, cx + 0.036f, 0.660f, HOOD_BASE_Y1, 2.170f, 2.215f);
+        Box(body, cx - 0.050f, cx + 0.050f, 0.660f, HOOD_BASE_Y1, 2.170f, 2.215f);
     }
 
     GroupMark m = GroupMarkNow(g);
@@ -524,7 +526,7 @@ static void BuildFront(void)
     ArchedPanel(body, CORE_HW, WELL_IN, HOOD_BACK_Z, 2.160f, AXLE_F, SILL_Y, HOOD_BASE_Y0, bayEnd);
 
     // Headlight assembly, standing proud of the fender face so it is not swallowed by it.
-    Box(dark, 0.660f, 0.900f, 0.720f, 1.040f, 2.200f, 2.250f);
+    Box(dark, 0.670f, 0.890f, 0.740f, 1.030f, 2.200f, 2.250f);
     Tube(lamp, (Vector3){ 0.780f, 0.925f, 2.244f }, (Vector3){ 0.780f, 0.925f, 2.266f }, 0.078f, 0.078f, 20, false, true);
     Tube(lamp, (Vector3){ 0.780f, 0.788f, 2.244f }, (Vector3){ 0.780f, 0.788f, 2.258f }, 0.040f, 0.040f, 14, false, true);
     // Marker light at the outboard corner of the front panel.
@@ -561,7 +563,7 @@ static void BuildCab(void)
             { -CAB_IN, 0.600f, CAB_BACK_Z + 0.020f }, { CAB_IN, 0.600f, CAB_BACK_Z + 0.020f },
             { CAB_IN, 0.600f, 0.580f },               { -CAB_IN, 0.600f, 0.580f },
             { -CAB_IN, ROOF_Y - 0.020f, CAB_BACK_Z + 0.020f }, { CAB_IN, ROOF_Y - 0.020f, CAB_BACK_Z + 0.020f },
-            { CAB_IN, ROOF_Y - 0.020f, 0.020f },      { -CAB_IN, ROOF_Y - 0.020f, 0.020f },
+            { CAB_IN, ROOF_Y - 0.020f, 0.000f },      { -CAB_IN, ROOF_Y - 0.020f, 0.000f },
         };
         Hex(dark, c);
     }
@@ -580,15 +582,26 @@ static void BuildCab(void)
         Quad(glass, a, b, c, d);
         Quad(glass, b, a2, d2, c);
         Quad(glass, a2, b2, c2, d2);
+
+        // Centre divider of the two-piece windscreen, standing 30 mm proud of the glass along its normal.
+        Vector3 o = Vector3Scale(n, 0.030f);
+        // Corner order maps (x, outward normal, top-to-bottom) onto the hexahedron's own (x, y, z); that triad is right-handed, so the winding still resolves outwards.
+        Vector3 et = { 0.034f, WS_TOP_Y, WS_TOP_Z }, eb = { 0.034f, COWL_Y, COWL_Z };
+        Vector3 e[8] = {
+            { -et.x, et.y, et.z }, { et.x, et.y, et.z }, { eb.x, eb.y, eb.z }, { -eb.x, eb.y, eb.z },
+            Vector3Add((Vector3){ -et.x, et.y, et.z }, o), Vector3Add(et, o),
+            Vector3Add(eb, o), Vector3Add((Vector3){ -eb.x, eb.y, eb.z }, o),
+        };
+        Hex(body, e);
     }
 
     // Roof and the header above the windscreen.
-    Box(body, -SIDE_W, SIDE_W, ROOF_Y - 0.055f, ROOF_Y, CAB_BACK_Z, 0.020f);
-    Box(body, -SIDE_W, SIDE_W, 1.700f, ROOF_Y, 0.020f, 0.140f);
+    Box(body, -SIDE_W, SIDE_W, RAIL_Y, ROOF_Y, CAB_BACK_Z, 0.020f);
+    Box(body, -SIDE_W, SIDE_W, RAIL_Y, ROOF_Y, 0.020f, 0.145f);
 
     // Rear cab wall with its window.
     Box(body, -SIDE_W, SIDE_W, SILL_Y, ROOF_Y, CAB_BACK_Z, CAB_BACK_Z + 0.060f);
-    Box(glass, -0.620f, 0.620f, 1.480f, 1.700f, CAB_BACK_Z - 0.006f, CAB_BACK_Z + 0.004f);
+    Box(glass, -0.620f, 0.620f, GLASS_Y0, GLASS_Y1, CAB_BACK_Z - 0.006f, CAB_BACK_Z + 0.004f);
 
     GroupMark m = GroupMarkNow(g);
 
@@ -602,13 +615,13 @@ static void BuildCab(void)
         };
         Hex(body, c);
     }
-    // Filler between the raked pillar and the vertical front edge of the door.
-    Prism(body, CAB_IN, SIDE_W, 0.140f, 0.560f, 1.694f, 1.294f, 1.700f, 1.700f);
+    // Filler between the raked pillar and the vertical front edge of the door, its underside following the pillar's top face.
+    Prism(body, CAB_IN, SIDE_W, 0.145f, 0.560f, 1.708f, 1.360f, RAIL_Y, RAIL_Y);
 
     // B and C pillars, and the roof rail joining them.
-    Box(body, CAB_IN, SIDE_W, DOOR_Y0, 1.700f, -0.290f, -0.210f);
-    Box(body, CAB_IN, SIDE_W, SILL_Y, 1.700f, CAB_BACK_Z, -1.070f);
-    Box(body, CAB_IN, SIDE_W, 1.700f, ROOF_Y, CAB_BACK_Z, 0.140f);
+    Box(body, CAB_IN, SIDE_W, DOOR_Y0, RAIL_Y, -0.290f, -0.210f);
+    Box(body, CAB_IN, SIDE_W, SILL_Y, RAIL_Y, CAB_BACK_Z, -1.070f);
+    Box(body, CAB_IN, SIDE_W, RAIL_Y, ROOF_Y, CAB_BACK_Z, 0.145f);
 
     // Cowl side, closing the body between the door's leading edge and the fender.
     Box(body, CAB_IN, SIDE_W, DOOR_Y0 - 0.020f, COWL_Y, 0.560f, HOOD_BACK_Z);
@@ -619,7 +632,7 @@ static void BuildCab(void)
         float z0 = door[d][0], z1 = door[d][1];
         Box(body, CAB_IN, SIDE_W - 0.010f, DOOR_Y0 + 0.020f, BELT_Y, z0, z1);
         Box(body, CAB_IN, SIDE_W - 0.010f, BELT_Y, GLASS_Y0, z0, z1);
-        Box(body, CAB_IN, SIDE_W - 0.010f, GLASS_Y1, 1.680f, z0, z1);
+        Box(body, CAB_IN, SIDE_W - 0.010f, GLASS_Y1, DOOR_TOP_Y, z0, z1);
         Box(body, CAB_IN, SIDE_W - 0.010f, GLASS_Y0, GLASS_Y1, z0, z0 + 0.040f);
         Box(body, CAB_IN, SIDE_W - 0.010f, GLASS_Y0, GLASS_Y1, z1 - 0.040f, z1);
         Box(glass, CAB_IN, SIDE_W - 0.040f, GLASS_Y0, GLASS_Y1, z0 + 0.040f, z1 - 0.040f);
@@ -627,10 +640,10 @@ static void BuildCab(void)
     Box(dark, SIDE_W - 0.012f, SIDE_W + 0.022f, 1.250f, 1.310f, -0.155f, -0.015f);
     Box(dark, SIDE_W - 0.012f, SIDE_W + 0.022f, 1.250f, 1.310f, -0.475f, -0.335f);
 
-    // Wing mirror on two arms off the A-pillar, standing outboard of the body as it does on the real truck.
-    Box(dark, SIDE_W, 0.905f, 1.400f, 1.640f, 0.500f, 0.570f);
-    Tube(dark, (Vector3){ 0.900f, 1.430f, 0.545f }, (Vector3){ 1.140f, 1.405f, 0.475f }, 0.017f, 0.017f, 8, true, true);
-    Tube(dark, (Vector3){ 0.900f, 1.610f, 0.545f }, (Vector3){ 1.140f, 1.595f, 0.475f }, 0.017f, 0.017f, 8, true, true);
+    // Wing mirror on two arms, its bracket overlapping the door's front window post rather than hanging clear of the body.
+    Box(dark, 0.850f, 0.900f, 1.420f, 1.620f, 0.495f, 0.550f);
+    Tube(dark, (Vector3){ 0.895f, 1.445f, 0.522f }, (Vector3){ 1.140f, 1.420f, 0.475f }, 0.017f, 0.017f, 8, true, true);
+    Tube(dark, (Vector3){ 0.895f, 1.595f, 0.522f }, (Vector3){ 1.140f, 1.580f, 0.475f }, 0.017f, 0.017f, 8, true, true);
     Box(dark, 1.120f, 1.290f, 1.350f, 1.660f, 0.415f, 0.480f);
     Box(glass, 1.135f, 1.275f, 1.370f, 1.640f, 0.405f, 0.417f);
 
@@ -678,8 +691,8 @@ static void BuildBed(void)
     GroupMirrorX(g, m);
 
     // Whip antenna on the right rear corner, and the fuel filler on the left, both of which the real truck carries on one side only.
-    Box(metal, 0.900f, 1.010f, BED_TOP_Y, BED_TOP_Y + 0.070f, -1.990f, -1.880f);
-    Tube(metal, (Vector3){ 0.955f, BED_TOP_Y + 0.070f, -1.935f }, (Vector3){ 0.985f, 2.420f, -1.935f },
+    Box(metal, 0.780f, 0.880f, BED_TOP_Y, BED_TOP_Y + 0.070f, -1.990f, -1.880f);
+    Tube(metal, (Vector3){ 0.830f, BED_TOP_Y + 0.070f, -1.935f }, (Vector3){ 0.860f, 2.420f, -1.935f },
          0.014f, 0.006f, 8, false, true);
     Tube(metal, (Vector3){ -SIDE_W - 0.014f, 1.280f, -1.320f }, (Vector3){ -SIDE_W + 0.010f, 1.280f, -1.320f },
          0.058f, 0.058f, 16, true, false);
@@ -836,8 +849,9 @@ const Scene SCENE = {
         "slab in a trough between raised fender crowns, arched fenders, eight-slat\n"
         "grille, protruding headlight housings with main and blackout lamps, corner\n"
         "markers, bumper with tow shackle brackets, hood latches. cab: cowl,\n"
-        "45-degree windscreen with wipers, A/B/C pillars, four doors with glass and\n"
-        "handles, roof, rear window, wing mirrors on twin arms. bed: cargo box, rear\n"
+        "two-piece 45-degree windscreen with a centre divider and wipers, A/B/C\n"
+        "pillars, four doors with glass and handles, roof at 1.830, rear window,\n"
+        "wing mirrors on twin arms off the door posts. bed: cargo box, rear\n"
         "flares with a flat shelf on top, tailgate, tail lights, rear bumper on\n"
         "gussets, whip antenna on the right rear corner, fuel filler on the left.\n"
         "running_gear: tyres, rims with eight lug nuts, half shafts, double\n"
