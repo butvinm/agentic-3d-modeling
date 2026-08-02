@@ -3,11 +3,20 @@
 
 #include "raylib.h"
 
+typedef struct Part {
+    const char *name;
+    void (*draw)(void);
+    BoundingBox (*bounds)(void);
+} Part;
+
 typedef struct Scene {
     const char *name;
+    const char *description;
     void (*init)(void);
     void (*draw)(void);
     void (*unload)(void);
+    const Part *parts;
+    int partCount;
     Vector3 target;
     float orbitRadius;
     float orbitHeight;

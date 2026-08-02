@@ -127,6 +127,11 @@ static void Unload(void)
 
 const Scene SCENE = {
     .name = "torus_knot",
+    .description =
+        "(2,3) trefoil torus knot: a circular cross-section swept along the curve\n"
+        "r(t) = 2 + cos(3t), using a Frenet frame from analytic derivatives.\n"
+        "320 segments along the curve, 24 sides around the tube, tube radius 0.45,\n"
+        "curve scale 1.5. Closed in both directions, no caps.",
     .init = Init,
     .draw = Draw,
     .unload = Unload,

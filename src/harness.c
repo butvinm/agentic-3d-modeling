@@ -15,7 +15,10 @@
 #define RAYLIB_SHADER_DIR "vendor/raylib/examples/shaders/resources/shaders/glsl330"
 #endif
 
+#define FOVY 45.0f
+
 static Shader lighting;
+static const Part *activePart = NULL;
 
 Shader HarnessLightingShader(void) { return lighting; }
 
@@ -32,9 +35,12 @@ static void SetupLighting(void)
     float ambient[4] = { 0.38f, 0.39f, 0.44f, 1.0f };
     SetShaderValue(lighting, GetShaderLocation(lighting, "ambient"), ambient, SHADER_UNIFORM_VEC4);
 
-    CreateLight(LIGHT_POINT, (Vector3){ 8.0f, 10.0f, 8.0f }, Vector3Zero(), (Color){ 255, 246, 224, 255 }, lighting);
-    CreateLight(LIGHT_POINT, (Vector3){ -9.0f, 5.0f, -7.0f }, Vector3Zero(), (Color){ 150, 178, 255, 255 }, lighting);
-    CreateLight(LIGHT_POINT, (Vector3){ 0.0f, -9.0f, 5.0f }, Vector3Zero(), (Color){ 135, 130, 150, 255 }, lighting);
+    // lighting.fs sums lightDot over every light and then gamma-corrects, so the
+    // fills stay dim: three full-strength lights multiply albedo far past 1.0 and
+    // wash dark materials out to grey.
+    CreateLight(LIGHT_POINT, (Vector3){ 8.0f, 10.0f, 8.0f }, Vector3Zero(), (Color){ 235, 228, 208, 255 }, lighting);
+    CreateLight(LIGHT_POINT, (Vector3){ -9.0f, 5.0f, -7.0f }, Vector3Zero(), (Color){ 62, 76, 108, 255 }, lighting);
+    CreateLight(LIGHT_POINT, (Vector3){ 0.0f, -9.0f, 5.0f }, Vector3Zero(), (Color){ 40, 39, 47, 255 }, lighting);
 }
 
 static float OrbitRadius(void) { return (SCENE.orbitRadius > 0.0f) ? SCENE.orbitRadius : 8.0f; }
@@ -45,21 +51,55 @@ static Color Background(void)
     return SCENE.background;
 }
 
-static Camera3D CameraAtAngle(float degrees)
+static void DrawSceneContent(void)
 {
-    float a = degrees * DEG2RAD;
-    float r = OrbitRadius();
+    if (activePart) { activePart->draw(); return; }
+    if (SCENE.draw) { SCENE.draw(); return; }
+    for (int i = 0; i < SCENE.partCount; i++) SCENE.parts[i].draw();
+}
+
+static Camera3D CameraOrbit(Vector3 target, float distance, float pitchDeg, float yawDeg)
+{
+    float pitch = pitchDeg * DEG2RAD;
+    float yaw = yawDeg * DEG2RAD;
     Camera3D cam = { 0 };
     cam.position = (Vector3){
-        SCENE.target.x + r * cosf(a),
-        SCENE.target.y + SCENE.orbitHeight,
-        SCENE.target.z + r * sinf(a),
+        target.x + distance * cosf(pitch) * cosf(yaw),
+        target.y + distance * sinf(pitch),
+        target.z + distance * cosf(pitch) * sinf(yaw),
     };
-    cam.target = SCENE.target;
+    cam.target = target;
     cam.up = (Vector3){ 0.0f, 1.0f, 0.0f };
-    cam.fovy = 45.0f;
+    cam.fovy = FOVY;
     cam.projection = CAMERA_PERSPECTIVE;
     return cam;
+}
+
+// Distance at which a sphere enclosing the box fills a comfortable share of the view.
+static void FrameBounds(BoundingBox box, Vector3 *target, float *distance)
+{
+    *target = (Vector3){
+        (box.min.x + box.max.x) * 0.5f,
+        (box.min.y + box.max.y) * 0.5f,
+        (box.min.z + box.max.z) * 0.5f,
+    };
+    float radius = Vector3Length(Vector3Subtract(box.max, box.min)) * 0.5f;
+    if (radius < 0.0001f) radius = 1.0f;
+    *distance = radius / sinf(FOVY * DEG2RAD * 0.5f) * 1.15f;
+}
+
+static void SceneFraming(Vector3 *target, float *distance, float *pitchDeg)
+{
+    if (activePart && activePart->bounds) {
+        FrameBounds(activePart->bounds(), target, distance);
+        *pitchDeg = 22.0f;
+        return;
+    }
+    float r = OrbitRadius();
+    float h = SCENE.orbitHeight;
+    *target = SCENE.target;
+    *distance = sqrtf(r * r + h * h);
+    *pitchDeg = atan2f(h, r) * RAD2DEG;
 }
 
 static void DrawWorld(Camera3D cam)
@@ -69,7 +109,7 @@ static void DrawWorld(Camera3D cam)
 
     BeginMode3D(cam);
         if (!SCENE.hideGrid) DrawGrid(20, 1.0f);
-        if (SCENE.draw) SCENE.draw();
+        DrawSceneContent();
     EndMode3D();
 }
 
@@ -86,9 +126,26 @@ static void MakeDirs(const char *path)
     mkdir(tmp, 0755);
 }
 
+static void WriteDescription(const char *outDir)
+{
+    if (!SCENE.description) return;
+
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/description.txt", outDir);
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        TraceLog(LOG_WARNING, "HARNESS: could not write %s", path);
+        return;
+    }
+    fprintf(f, "%s\n", SCENE.description);
+    fclose(f);
+    printf("%s\n", path);
+}
+
 static int RunShots(const char *outDir, int frames, int width, int height, int ss)
 {
     MakeDirs(outDir);
+    WriteDescription(outDir);
 
     RenderTexture2D rt = LoadRenderTexture(width * ss, height * ss);
     if (rt.id == 0) {
@@ -97,12 +154,16 @@ static int RunShots(const char *outDir, int frames, int width, int height, int s
     }
     SetTextureFilter(rt.texture, TEXTURE_FILTER_BILINEAR);
 
+    Vector3 target;
+    float distance, pitch;
+    SceneFraming(&target, &distance, &pitch);
+
     for (int i = 0; i < frames; i++) {
-        float degrees = 45.0f + 360.0f * (float)i / (float)frames;
+        float yaw = 45.0f + 360.0f * (float)i / (float)frames;
 
         BeginTextureMode(rt);
             ClearBackground(Background());
-            DrawWorld(CameraAtAngle(degrees));
+            DrawWorld(CameraOrbit(target, distance, pitch, yaw));
         EndTextureMode();
 
         Image img = LoadImageFromTexture(rt.texture);
@@ -110,7 +171,12 @@ static int RunShots(const char *outDir, int frames, int width, int height, int s
         if (ss > 1) ImageResize(&img, width, height);
 
         char path[1024];
-        snprintf(path, sizeof(path), "%s/%s_%02d.png", outDir, SCENE.name ? SCENE.name : "scene", i);
+        if (activePart) {
+            snprintf(path, sizeof(path), "%s/%s_%s_%02d.png", outDir, SCENE.name, activePart->name, i);
+        } else {
+            snprintf(path, sizeof(path), "%s/%s_%02d.png", outDir, SCENE.name ? SCENE.name : "scene", i);
+        }
+
         if (!ExportImage(img, path)) {
             TraceLog(LOG_ERROR, "HARNESS: failed to export %s", path);
             UnloadImage(img);
@@ -127,16 +193,33 @@ static int RunShots(const char *outDir, int frames, int width, int height, int s
 
 static void RunInteractive(void)
 {
-    Camera3D cam = CameraAtAngle(45.0f);
+    Vector3 target;
+    float distance, pitch;
+    SceneFraming(&target, &distance, &pitch);
+
+    const float startPitch = pitch, startDistance = distance;
+    float yaw = 45.0f;
+    bool spinning = true;
 
     while (!WindowShouldClose()) {
-        UpdateCamera(&cam, CAMERA_ORBITAL);
+        if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+            Vector2 delta = GetMouseDelta();
+            yaw -= delta.x * 0.3f;
+            pitch = Clamp(pitch + delta.y * 0.3f, -85.0f, 85.0f);
+            spinning = false;
+        }
+        if (IsKeyPressed(KEY_SPACE)) spinning = !spinning;
+        if (IsKeyPressed(KEY_R)) { pitch = startPitch; distance = startDistance; yaw = 45.0f; }
+        if (spinning) yaw += 28.0f * GetFrameTime();
+
+        float wheel = GetMouseWheelMove();
+        if (wheel != 0.0f) distance = Clamp(distance * (1.0f - wheel * 0.12f), 0.5f, 1000.0f);
 
         BeginDrawing();
             ClearBackground(Background());
-            DrawWorld(cam);
-            DrawText(SCENE.name ? SCENE.name : "scene", 12, 12, 20, RAYWHITE);
-            DrawText("orbital camera: drag / wheel to inspect, ESC to quit", 12, 38, 14, GRAY);
+            DrawWorld(CameraOrbit(target, distance, pitch, yaw));
+            DrawText(activePart ? activePart->name : (SCENE.name ? SCENE.name : "scene"), 12, 12, 20, RAYWHITE);
+            DrawText("drag: orbit | wheel: zoom | space: auto-spin | R: reset | ESC: quit", 12, 38, 14, GRAY);
             DrawFPS(GetScreenWidth() - 90, 12);
         EndDrawing();
     }
@@ -144,14 +227,25 @@ static void RunInteractive(void)
 
 static void Usage(const char *argv0)
 {
-    printf("usage: %s [--shots DIR] [--frames N] [--size WxH] [--supersample N]\n", argv0);
-    printf("  no args   open an interactive orbital-camera window\n");
-    printf("  --shots   render N turntable views to DIR as PNG and exit\n");
+    printf("usage: %s [--shots DIR] [--frames N] [--size WxH] [--supersample N] [--part NAME]\n", argv0);
+    printf("  no args        open an interactive orbit-camera window\n");
+    printf("  --shots        render N turntable views to DIR as PNG and exit\n");
+    printf("  --part NAME    render only that part, framed to its own bounds\n");
+    printf("  --list-parts   print this scene's part names and exit\n");
+}
+
+static const Part *FindPart(const char *name)
+{
+    for (int i = 0; i < SCENE.partCount; i++) {
+        if (strcmp(SCENE.parts[i].name, name) == 0) return &SCENE.parts[i];
+    }
+    return NULL;
 }
 
 int main(int argc, char **argv)
 {
     const char *outDir = NULL;
+    const char *partName = NULL;
     int frames = 4;
     int width = 1024;
     int height = 768;
@@ -159,8 +253,13 @@ int main(int argc, char **argv)
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--shots") == 0 && i + 1 < argc) outDir = argv[++i];
+        else if (strcmp(argv[i], "--part") == 0 && i + 1 < argc) partName = argv[++i];
         else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) frames = atoi(argv[++i]);
         else if (strcmp(argv[i], "--supersample") == 0 && i + 1 < argc) ss = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--list-parts") == 0) {
+            for (int p = 0; p < SCENE.partCount; p++) printf("%s\n", SCENE.parts[p].name);
+            return 0;
+        }
         else if (strcmp(argv[i], "--size") == 0 && i + 1 < argc) {
             if (sscanf(argv[++i], "%dx%d", &width, &height) != 2) {
                 fprintf(stderr, "bad --size, expected WxH\n");
@@ -173,6 +272,19 @@ int main(int argc, char **argv)
     if (frames < 1) frames = 1;
     if (ss < 1) ss = 1;
     if (width < 16 || height < 16) { fprintf(stderr, "--size too small\n"); return 2; }
+
+    if (partName) {
+        if (SCENE.partCount == 0) {
+            fprintf(stderr, "scene '%s' declares no parts\n", SCENE.name);
+            return 2;
+        }
+        activePart = FindPart(partName);
+        if (!activePart) {
+            fprintf(stderr, "no part named '%s'; available:\n", partName);
+            for (int p = 0; p < SCENE.partCount; p++) fprintf(stderr, "  %s\n", SCENE.parts[p].name);
+            return 2;
+        }
+    }
 
     if (outDir) {
         SetTraceLogLevel(LOG_WARNING);
