@@ -552,9 +552,9 @@ static void BuildFront(void)
     ArchedPanel(body, CORE_HW, WELL_IN, HOOD_BACK_Z, 2.160f, AXLE_F, SILL_Y, HOOD_BASE_Y0, bayEnd);
 
     // Headlight assembly, standing proud of the fender face so it is not swallowed by it.
-    Box(dark, 0.670f, 0.890f, 0.740f, 1.030f, 2.200f, 2.250f);
-    Tube(lamp, (Vector3){ 0.780f, 0.925f, 2.244f }, (Vector3){ 0.780f, 0.925f, 2.266f }, 0.078f, 0.078f, 20, false, true);
-    Tube(lamp, (Vector3){ 0.780f, 0.788f, 2.244f }, (Vector3){ 0.780f, 0.788f, 2.258f }, 0.040f, 0.040f, 14, false, true);
+    Box(dark, 0.672f, 0.888f, 0.760f, 1.000f, 2.200f, 2.250f);
+    Tube(lamp, (Vector3){ 0.780f, 0.910f, 2.244f }, (Vector3){ 0.780f, 0.910f, 2.264f }, 0.072f, 0.072f, 20, false, true);
+    Tube(lamp, (Vector3){ 0.780f, 0.797f, 2.244f }, (Vector3){ 0.780f, 0.797f, 2.256f }, 0.031f, 0.031f, 14, false, true);
     // Marker light at the outboard corner of the front panel.
     Box(lamp, 0.940f, 1.060f, 0.980f, 1.070f, 2.210f, 2.246f);
 
@@ -624,9 +624,16 @@ static void BuildCab(void)
         Hex(body, e);
     }
 
-    // Roof and the header above the windscreen.
-    Box(body, -SIDE_W, SIDE_W, RAIL_Y, ROOF_Y, CAB_BACK_Z, 0.020f);
-    Box(body, -SIDE_W, SIDE_W, RAIL_Y, ROOF_Y, 0.020f, 0.145f);
+    // Roof and the header above the windscreen, their top faces drawn in 35 mm either side so the hardtop's edge is chamfered rather than a full-width slab.
+    for (int i = 0; i < 2; i++) {
+        float rz0 = (i == 0) ? CAB_BACK_Z : 0.020f;
+        float rz1 = (i == 0) ? 0.020f : 0.145f;
+        Vector3 c[8] = {
+            { -SIDE_W, RAIL_Y, rz0 }, { SIDE_W, RAIL_Y, rz0 }, { SIDE_W, RAIL_Y, rz1 }, { -SIDE_W, RAIL_Y, rz1 },
+            { -0.835f, ROOF_Y, rz0 }, { 0.835f, ROOF_Y, rz0 }, { 0.835f, ROOF_Y, rz1 }, { -0.835f, ROOF_Y, rz1 },
+        };
+        Hex(body, c);
+    }
 
     // Rear cab wall with its window.
     Box(body, -SIDE_W, SIDE_W, SILL_Y, ROOF_Y, CAB_BACK_Z, CAB_BACK_Z + 0.060f);
@@ -647,10 +654,9 @@ static void BuildCab(void)
     // Filler between the raked pillar and the vertical front edge of the door, its underside following the pillar's top face.
     Prism(body, CAB_IN, SIDE_W, 0.145f, 0.560f, 1.708f, 1.360f, RAIL_Y, RAIL_Y);
 
-    // B and C pillars, and the roof rail joining them.
+    // B and C pillars. Above RAIL_Y the chamfered roof is the only bodywork, so there is no separate side rail to hide the chamfer.
     Box(body, CAB_IN, SIDE_W, DOOR_Y0, RAIL_Y, -0.290f, -0.210f);
     Box(body, CAB_IN, SIDE_W, SILL_Y, RAIL_Y, CAB_BACK_Z, -1.070f);
-    Box(body, CAB_IN, SIDE_W, RAIL_Y, ROOF_Y, CAB_BACK_Z, 0.145f);
 
     // Cowl side, closing the body between the door's leading edge and the fender.
     Box(body, CAB_IN, SIDE_W, DOOR_Y0 - 0.020f, COWL_Y, 0.560f, HOOD_BACK_Z);
@@ -708,8 +714,8 @@ static void BuildBed(void)
     Box(body, -CAB_IN, CAB_IN, 1.070f, BED_FLOOR_Y, TAIL_Z, CAB_BACK_Z);
     // Tailgate, with the two horizontal stiffening ribs the cargo body carries.
     Box(body, -SIDE_W, SIDE_W, 1.040f, BED_TOP_Y, TAIL_Z - 0.060f, TAIL_Z);
-    Box(body, -0.850f, 0.850f, 1.120f, 1.155f, TAIL_Z - 0.085f, TAIL_Z - 0.060f);
-    Box(body, -0.850f, 0.850f, 1.290f, 1.325f, TAIL_Z - 0.085f, TAIL_Z - 0.060f);
+    Box(body, -0.850f, 0.850f, 1.120f, 1.155f, TAIL_Z - 0.085f, TAIL_Z - 0.050f);
+    Box(body, -0.850f, 0.850f, 1.290f, 1.325f, TAIL_Z - 0.085f, TAIL_Z - 0.050f);
     // Rear bumper.
     Box(metal, -HALF_W, HALF_W, 0.560f, 0.720f, BUMP_R_Z, TAIL_Z - 0.060f);
 
@@ -720,15 +726,16 @@ static void BuildBed(void)
     ArchedPanel(body, CORE_HW, WELL_IN, TAIL_Z, CAB_BACK_Z, AXLE_R, SILL_Y, BED_FLOOR_Y, BED_FLOOR_Y);
     // Bed side wall, stepped inboard above the flare, with a capped top rail and external stiffening ribs.
     Box(body, CAB_IN, SIDE_W, FLARE_TOP_Y, BED_TOP_Y, TAIL_Z, CAB_BACK_Z);
-    Box(body, 0.785f, 0.885f, BED_TOP_Y, 1.455f, TAIL_Z, CAB_BACK_Z);
+    // Every joint below is given a few millimetres of overlap into its parent rather than meeting it face to face, so no interface is a coincident plane.
+    Box(body, 0.785f, 0.885f, BED_TOP_Y - 0.010f, 1.455f, TAIL_Z, CAB_BACK_Z);
     for (int i = 0; i < 3; i++) {
         float rz = -1.350f - 0.250f * (float)i;
-        Box(body, SIDE_W, 0.895f, FLARE_TOP_Y, BED_TOP_Y, rz - 0.030f, rz + 0.030f);
+        Box(body, SIDE_W - 0.010f, 0.910f, FLARE_TOP_Y - 0.010f, BED_TOP_Y, rz - 0.035f, rz + 0.035f);
     }
     // Tie-down cleats on the rail, and the tailgate latch and hinge.
-    Box(metal, 0.800f, 0.870f, 1.455f, 1.505f, -1.485f, -1.415f);
-    Box(metal, 0.800f, 0.870f, 1.455f, 1.505f, -1.835f, -1.765f);
-    Box(metal, 0.400f, 0.520f, 1.340f, 1.380f, TAIL_Z - 0.095f, TAIL_Z - 0.060f);
+    Box(metal, 0.800f, 0.870f, 1.445f, 1.505f, -1.485f, -1.415f);
+    Box(metal, 0.800f, 0.870f, 1.445f, 1.505f, -1.835f, -1.765f);
+    Box(metal, 0.400f, 0.520f, 1.340f, 1.380f, TAIL_Z - 0.095f, TAIL_Z - 0.050f);
     Box(metal, 0.350f, 0.470f, 1.030f, 1.070f, TAIL_Z - 0.085f, TAIL_Z - 0.055f);
     // Tail lights.
     Box(tail, 0.620f, 0.780f, 1.180f, 1.320f, TAIL_Z - 0.090f, TAIL_Z - 0.058f);
@@ -899,7 +906,8 @@ const Scene SCENE = {
         "grille, protruding headlight housings with main and blackout lamps, corner\n"
         "markers, bumper with tow shackle brackets, hood latches. cab: cowl,\n"
         "two-piece 45-degree windscreen with a centre divider and wipers, A/B/C\n"
-        "pillars, four doors with glass, handles and external hinges, roof at 1.830,\n"
+        "pillars, four doors with glass, handles and external hinges, chamfered\n"
+        "hardtop roof at 1.830 drawn in 35 mm either side of the body,\n"
         "rear window, wing mirrors on twin arms off the door posts. bed: cargo box\n"
         "with a capped top rail, external side ribs and tie-down cleats, rear\n"
         "flares with a flat shelf on top, ribbed tailgate on hinges with latches,\n"
