@@ -31,7 +31,12 @@ NextStem() {
         stem="$DIR/ref_$(printf '%02d' "$n")"
         # A partially written .download must also reserve its slot.
         set -- "$stem".*
-        [ -e "$1" ] || { echo "$stem"; return; }
+        # So must a stem sources.txt has already spoken for.
+        # The images are git-ignored but sources.txt is tracked, so a fresh clone or worktree has the provenance lines without the files.
+        # Numbering from the files alone would then hand out ref_01 a second time and leave two URLs claiming one name.
+        if [ ! -e "$1" ] && ! grep -q "^ref_$(printf '%02d' "$n")\." "$DIR/sources.txt" 2>/dev/null; then
+            echo "$stem"; return
+        fi
         n=$((n + 1))
     done
 }
