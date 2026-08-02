@@ -23,6 +23,10 @@
 #define ROD_Y     191.0f   // cleaning rod axis
 #define GAS_Y     228.8f   // gas tube axis
 
+// The gas tube's two ends, named because the piston has to stay between them and reads its rest position off the front one.
+#define GASTUBE_Z0 141.0f
+#define GASTUBE_Z1 326.0f
+
 static Vector3 gOrigin = { 0.0f, 0.0f, Z_ORIGIN };
 
 // Model millimetres to world units. The only place the two frames meet, so a pivot written in millimetres below turns into the translation that places its body.
@@ -911,9 +915,9 @@ static void BuildBarrel(void)
     };
     Hex(s, riser);
 
-    Tube(s, (Vector3){ 0, GAS_Y, 141.0f }, (Vector3){ 0, GAS_Y, 152.0f }, 9.2f, 9.2f, 28, true, false);
+    Tube(s, (Vector3){ 0, GAS_Y, GASTUBE_Z0 }, (Vector3){ 0, GAS_Y, 152.0f }, 9.2f, 9.2f, 28, true, false);
     Tube(s, (Vector3){ 0, GAS_Y, 152.0f }, (Vector3){ 0, GAS_Y, 206.0f }, 8.0f, 8.0f, 28, false, false);
-    Tube(s, (Vector3){ 0, GAS_Y, 206.0f }, (Vector3){ 0, GAS_Y, 326.0f }, 9.2f, 9.2f, 28, false, true);
+    Tube(s, (Vector3){ 0, GAS_Y, 206.0f }, (Vector3){ 0, GAS_Y, GASTUBE_Z1 }, 9.2f, 9.2f, 28, false, true);
 
     // Slotted panel on top of the gas tube: a dark floor framed by two rails and five cross ribs, leaving the four ports the reference shows.
     Box(s, -5.0f, 5.0f, 234.0f, 236.4f, 152.0f, 206.0f);
@@ -1370,9 +1374,9 @@ static void BuildCarrier(void)
     Box(s, RCV_SIDE + 0.4f, 21.5f, 214.0f, 227.0f, HAND_Z0 - 2.0f, HAND_Z1 + 2.0f);
     Tube(s, (Vector3){ 21.5f, 220.5f, 388.0f }, (Vector3){ 30.0f, 220.5f, 388.0f }, 4.8f, 4.0f, 20, false, true);
 
-    // Gas piston. The head stays inside the gas tube over the whole cycle, which CheckAction measures rather than assumes.
-    Tube(b, (Vector3){ 0.0f, GAS_Y, 142.0f }, (Vector3){ 0.0f, GAS_Y, CAR_Z0 + 8.0f }, 4.0f, 4.0f, 16, false, false);
-    Tube(b, (Vector3){ 0.0f, GAS_Y, 118.0f }, (Vector3){ 0.0f, GAS_Y, 142.0f }, 7.5f, 7.5f, 22, true, true);
+    // Gas piston. The head has to stay inside the gas tube at BOTH ends of the travel, and its rest position is set from the tube's front cap rather than typed: at z 118 to 142 it stood 23 mm out in the open ahead of the tube whenever the carrier was forward, covered only by a gas-block riser that is both shorter and narrower than it, and it withdrew out of sight as the carrier ran back. On the real rifle the head sits in the gas block's cylinder at rest, but this model's gas block is not bored, so the nearest honest place for it is just inside the tube's mouth.
+    Tube(b, (Vector3){ 0.0f, GAS_Y, GASTUBE_Z0 + 29.0f }, (Vector3){ 0.0f, GAS_Y, CAR_Z0 + 8.0f }, 4.0f, 4.0f, 16, false, false);
+    Tube(b, (Vector3){ 0.0f, GAS_Y, GASTUBE_Z0 + 5.0f }, (Vector3){ 0.0f, GAS_Y, GASTUBE_Z0 + 29.0f }, 7.5f, 7.5f, 22, true, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -1727,7 +1731,7 @@ static void Update(float t)
 static void CheckAction(void)
 {
     const int steps = 360;
-    float handRear = -1e9f, carRear = -1e9f, headAft = -1e9f;
+    float handRear = -1e9f, carRear = -1e9f, headAft = -1e9f, headFwd = 1e9f;
     float shoeAft = -1e9f, shoeLow = 1e9f;
     float portLoY = 1e9f, portHiY = -1e9f;
     float portLoZ = 1e9f, portHiZ = -1e9f;
@@ -1740,7 +1744,8 @@ static void CheckAction(void)
 
         if (HAND_Z1 + travel > handRear) handRear = HAND_Z1 + travel;
         if (CAR_Z0 + CAR_L + travel > carRear) carRear = CAR_Z0 + CAR_L + travel;
-        if (142.0f + travel > headAft) headAft = 142.0f + travel;
+        if (GASTUBE_Z0 + 29.0f + travel > headAft) headAft = GASTUBE_Z0 + 29.0f + travel;
+        if (GASTUBE_Z0 + 5.0f + travel < headFwd) headFwd = GASTUBE_Z0 + 5.0f + travel;
 
         // Everything the trigger and the case are checked against is on the rifle and recoils with it, so both are measured in the rifle's frame. Measuring them in the world instead compares a recoiled part against an un-recoiled limit, which is what the first version of this did: it reported the trigger 21 mm through a guard it never touches.
         Matrix rifleInv = MatrixInvert(RifleAt(phase, NULL, NULL));
@@ -1804,7 +1809,9 @@ static void CheckAction(void)
              TRAVEL, carRear, CHAN_Z1, CHAN_Z1 - carRear);
     TraceLog(LOG_INFO, "ak47_anim: charging handle reaches %.1f against the slot end at %.1f (%.1f mm spare); the channel wall is the binding limit",
              handRear, TRACK_Z1, TRACK_Z1 - handRear);
-    TraceLog(LOG_INFO, "ak47_anim: piston head reaches %.1f, gas tube ends at 326.0 (%.1f mm spare)", headAft, 326.0f - headAft);
+    // BOTH ends. Testing only the aft one reported 112 mm of spare while 23 mm of the head stood out in the open ahead of the tube at every pose where the carrier was forward, which is the failure this file's own notes describe: a bound checked in one axis and not the other.
+    TraceLog(LOG_INFO, "ak47_anim: piston head runs %.1f to %.1f inside a gas tube of %.1f to %.1f (%.1f mm spare at the front, %.1f at the rear)",
+             headFwd, headAft, GASTUBE_Z0, GASTUBE_Z1, headFwd - GASTUBE_Z0, GASTUBE_Z1 - headAft);
     TraceLog(LOG_INFO, "ak47_anim: travel %.1f mm against a 56.0 mm cartridge, %.1f mm of clearance for the next round",
              TRAVEL, TRAVEL - 56.0f);
     TraceLog(LOG_INFO, "ak47_anim: trigger shoe reaches z %.1f, guard rear web at 558.0 (%.1f mm spare), and drops to y %.1f over the bow at 133.4 (%.1f mm spare)",
@@ -1812,7 +1819,8 @@ static void CheckAction(void)
 
     if (carRear > CHAN_Z1) TraceLog(LOG_WARNING, "ak47_anim: carrier passes through the channel rear wall by %.2f mm", carRear - CHAN_Z1);
     if (handRear > TRACK_Z1) TraceLog(LOG_WARNING, "ak47_anim: charging handle passes the end of its slot by %.2f mm", handRear - TRACK_Z1);
-    if (headAft > 326.0f) TraceLog(LOG_WARNING, "ak47_anim: piston head leaves the gas tube by %.2f mm", headAft - 326.0f);
+    if (headAft > GASTUBE_Z1) TraceLog(LOG_WARNING, "ak47_anim: piston head leaves the back of the gas tube by %.2f mm", headAft - GASTUBE_Z1);
+    if (headFwd < GASTUBE_Z0) TraceLog(LOG_WARNING, "ak47_anim: piston head stands %.2f mm out of the front of the gas tube", GASTUBE_Z0 - headFwd);
     if (TRAVEL < 56.0f) TraceLog(LOG_WARNING, "ak47_anim: travel %.1f mm is under the 56.0 mm cartridge length", TRAVEL);
 
     if (!portSeen) {
@@ -2032,7 +2040,7 @@ const Scene SCENE = {
         "Many faint puffs rather than a few solid ones, because a closed surface has a hard silhouette at any subdivision: at the alpha needed to be seen at all, one blob is a grey rock. Overlapping twenty-eight at about a sixth of that alpha, over a four-to-one spread of sizes, puts density in the middle and lets the edge fall off. That is the only soft edge available: a genuinely continuous plume needs a per-fragment falloff, which means a shader, and shaders belong to the harness rather than to any one model. Review rounds three and four both reported the puffs as still individually readable, which is a fair description of what this technique can do rather than a defect that more tuning will remove. The port puffs are much fainter than the muzzle ones on purpose: at the muzzle's density they drift between the camera and the receiver and veil the flank, and the ejection port is the thing a reviewer most needs to see into.\n"
         "Smoke that behaved honestly would still be hanging there when the cycle repeated, and a repeating cycle would silt up with it. Each puff fades to nothing by the end, which is a concession to looping and not a claim about smoke.\n"
         "The case and the smoke are the two things NOT posed inside the rifle's recoil frame. Both are free bodies once they have left, so each is launched from where its opening was at the instant it let go and is independent of the rifle after that.\n"
-        "bolt_carrier: carrier body 140 long by 22 wide by 15 deep, a 14.8 diameter bolt protruding 14 forward of it with two locking lugs, a gas piston on the gas-tube axis with a 15 diameter head, and the charging handle. One mesh, because on the rifle they are one part: the handle is the only externally visible token of where the carrier is, and letting it be a second body would let the two disagree. Local origin on the carrier's front face at the gas-tube axis, so the pose is a bare translation aft.\n"
+        "bolt_carrier: carrier body 140 long by 22 wide by 15 deep, a 14.8 diameter bolt protruding 14 forward of it with two locking lugs, a gas piston on the gas-tube axis with a 15 diameter head, and the charging handle. The head's rest position is read off the gas tube's front cap rather than typed: sited at z 118 to 142 it stood 23 mm proud of the tube in the open air ahead of the gas block whenever the carrier was forward, and withdrew out of sight as the carrier ran back. On the rifle it would sit in the gas block's cylinder, but this model's gas block is not bored, so just inside the tube's mouth is the nearest honest place for it. One mesh, because on the rifle they are one part: the handle is the only externally visible token of where the carrier is, and letting it be a second body would let the two disagree. Local origin on the carrier's front face at the gas-tube axis, so the pose is a bare translation aft.\n"
         "trigger: local origin ON the pin at (y 174, z 550) that it swings about, so the pose is a bare rotation about local x, 9 degrees, about 5 mm at the shoe. The pin head now shown on both receiver flanks is drawn from those same two numbers rather than from a copy of them.\n"
         "case: a fired 7.62x39 case, 38.70 long on an 11.35 rim with a 10.07 shoulder and an 8.60 neck, from the cartridge drawing on the 7.62x39mm Wikipedia article. It rides the bolt face until the end of the rearward stroke, is kicked 9.7 up off it by the ejector, and is thrown at 3.4 m/s right, 1.25 up and 0.3 forward, tumbling 12 turns a second under gravity once it is clear.\n"
         "Almost every number in that sentence was forced by the port rather than chosen, and the check is what forced them. A 17 mm high opening passing an 11.35 mm thick case leaves 5.65 mm of slack in total, so:\n"
@@ -2046,7 +2054,7 @@ const Scene SCENE = {
         "The channel's left wall, floor and rear wall are finished dark, and the carrier carries a bright 52 by 14 wear face on its right flank. Both are true of a receiver and a carrier that has cycled, and both are here because four review rounds running reported the ejection port as a barely changing recess: bare milled walls, a blued carrier and a bright patch on it are all mid greys at this camera distance, so nothing in the opening changed value as the carrier ran. Making the patch bigger did not fix that and was not the problem. A dark background behind a bright moving face was. Each liner is buried into the wall behind it rather than laid on its face, so no two surfaces are coincident.\n"
         "\n"
         "THE TRAVEL IS NOT A MEASURED FIGURE, AND THE MODEL IS INCONSISTENT ABOUT IT\n"
-        "No reference found gives a bolt carrier travel for the AK-47, so 72 mm is not measured: it is the largest travel this receiver admits, the carrier stopping 8 mm short of the channel's rear wall. CheckAction measures that at build time over 360 steps and reports it, together with the margin at the charging handle's slot, the piston head against the end of the gas tube, the trigger shoe against the guard's rear web, the recoil the momentum comes to and whether it is back in battery when the cycle repeats, and the height at which the case crosses the receiver wall against the ejection port's opening.\n"
+        "No reference found gives a bolt carrier travel for the AK-47, so 72 mm is not measured: it is the largest travel this receiver admits, the carrier stopping 8 mm short of the channel's rear wall. CheckAction measures that at build time over 360 steps and reports it, together with the margin at the charging handle's slot, the piston head against BOTH ends of the gas tube, the trigger shoe against the guard's rear web, the recoil the momentum comes to and whether it is back in battery when the cycle repeats, and the height at which the case crosses the receiver wall against the ejection port's opening.\n"
         "The trigger and the case are checked in the RIFLE's frame, not the world's, because everything they are checked against is bolted to a rifle that now recoils. Measuring them in the world compares a recoiled part against a limit that moved with it, which is what the first version of that check did: it reported the trigger 21 mm through a guard it never touches.\n"
         "That last set of numbers exposes a real inconsistency in the geometry, and it is recorded rather than hidden: the charging-handle slot measured off ref_01 runs z 380 to 540, which with a 10 mm handle implies about 147 mm of travel, but the receiver's internal length between the front face at z 372 and the stock tang at z 606 leaves only 72 mm once a 140 mm carrier is inside it. Either the slot is longer than it should be, or the carrier is too long for it, or the receiver's internal length is short. The travel is set to the smaller of the two limits, so about 75 mm of the slot is never used, and a reviewer should read that unused slot as an open question rather than as a modelling slip.\n"
         "Beating the 56.00 mm cartridge overall length is the one thing the travel has to do for a fresh round to have anywhere to go, and at 72 mm it does, by 16 mm.\n"
