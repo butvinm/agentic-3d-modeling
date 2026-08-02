@@ -433,6 +433,13 @@ static float ArchTop(float z, float zc)
 // Bodywork slab with a wheel opening cut out of its underside.
 // The opening is the circle of radius ARCH_R about the axle; away from it the slab runs down to yFloor.
 // Consecutive strips share their edges exactly, so the arch reads as a smooth curve rather than a staircase.
+// Outward normal of the well soffit: on the arch it points straight back at the axle, on the flat floor it points down.
+static Vector3 SoffitNormal(float z, float zc, float y, float yFloor)
+{
+    if (y <= yFloor + 1e-4f) return (Vector3){ 0.0f, -1.0f, 0.0f };
+    return (Vector3){ 0.0f, (AXLE_Y - y) / ARCH_R, (zc - z) / ARCH_R };
+}
+
 static void ArchedPanel(Builder *b, float x0, float x1, float z0, float z1,
                         float zc, float yFloor, float yTop0, float yTop1)
 {
@@ -444,9 +451,28 @@ static void ArchedPanel(Builder *b, float x0, float x1, float z0, float z1,
         float t0 = (float)i / (float)steps;
         float t1 = (float)(i + 1) / (float)steps;
         float za = Lerp(z0, z1, t0), zb = Lerp(z0, z1, t1);
-        Prism(b, x0, x1, za, zb,
-              fmaxf(yFloor, ArchTop(za, zc)), fmaxf(yFloor, ArchTop(zb, zc)),
-              Lerp(yTop0, yTop1, t0), Lerp(yTop0, yTop1, t1));
+        float yba = fmaxf(yFloor, ArchTop(za, zc)), ybb = fmaxf(yFloor, ArchTop(zb, zc));
+        float yta = Lerp(yTop0, yTop1, t0), ytb = Lerp(yTop0, yTop1, t1);
+        Vector3 na = SoffitNormal(za, zc, yba, yFloor), nb = SoffitNormal(zb, zc, ybb, yFloor);
+
+        // The soffit is the only curved surface on this panel, so it is the only one given smooth normals; the outer, inner and top faces are planar across the whole sweep and stay flat.
+        QuadN(b, (Vector3){ x0, yba, za }, (Vector3){ x1, yba, za },
+                 (Vector3){ x1, ybb, zb }, (Vector3){ x0, ybb, zb }, na, na, nb, nb);
+        Quad(b, (Vector3){ x0, yta, za }, (Vector3){ x0, ytb, zb },
+                (Vector3){ x1, ytb, zb }, (Vector3){ x1, yta, za });
+        Quad(b, (Vector3){ x1, yba, za }, (Vector3){ x1, yta, za },
+                (Vector3){ x1, ytb, zb }, (Vector3){ x1, ybb, zb });
+        Quad(b, (Vector3){ x0, yba, za }, (Vector3){ x0, ybb, zb },
+                (Vector3){ x0, ytb, zb }, (Vector3){ x0, yta, za });
+
+        if (i == 0) {
+            Quad(b, (Vector3){ x0, yba, za }, (Vector3){ x0, yta, za },
+                    (Vector3){ x1, yta, za }, (Vector3){ x1, yba, za });
+        }
+        if (i == steps - 1) {
+            Quad(b, (Vector3){ x0, ybb, zb }, (Vector3){ x1, ybb, zb },
+                    (Vector3){ x1, ytb, zb }, (Vector3){ x0, ytb, zb });
+        }
     }
 }
 
@@ -532,8 +558,11 @@ static void BuildFront(void)
     // Marker light at the outboard corner of the front panel.
     Box(lamp, 0.940f, 1.060f, 0.980f, 1.070f, 2.210f, 2.246f);
 
-    // Tow shackle bracket on the bumper face.
-    Box(metal, 0.380f, 0.480f, 0.520f, 0.640f, 2.350f, 2.430f);
+    // Lifting shackle: two clevis plates with an open gap between them and a pin across it, projecting 0.05 past the bumper face.
+    Box(metal, 0.372f, 0.404f, 0.520f, 0.634f, 2.350f, 2.400f);
+    Box(metal, 0.456f, 0.488f, 0.520f, 0.634f, 2.350f, 2.400f);
+    Tube(metal, (Vector3){ 0.362f, 0.566f, 2.382f }, (Vector3){ 0.498f, 0.566f, 2.382f },
+         0.017f, 0.017f, 10, true, true);
     // Hood latch, sitting on the sloped hood skin near its front corner.
     Box(metal, 0.500f, 0.600f, 1.055f, 1.080f, 2.140f, 2.190f);
 
@@ -839,7 +868,8 @@ const Scene SCENE = {
     .name = "humvee_v2",
     .description =
         "M998 HMMWV cargo/troop carrier: four doors, hard cab roof, open cargo bed.\n"
-        "One world unit is one metre. 4.57 long, 2.16 wide, 1.83 tall over the roof,\n"
+        "One world unit is one metre. 4.57 bumper to bumper, 2.16 wide, 1.83 tall\n"
+        "over the roof; the front lifting shackles project 0.05 further, to z = 2.40.\n"
         "3.30 wheelbase, 1.83 track, 0.41 ground clearance, 37x12.5R16.5 tyres of\n"
         "0.47 radius and 0.324 width. Origin sits on the ground at the centre of the\n"
         "wheelbase, +Z forward.\n"
@@ -860,8 +890,10 @@ const Scene SCENE = {
         "Construction: everything is either a hexahedron with eight freely placed\n"
         "corners or a surface of revolution. Wheel openings are cut by sweeping\n"
         "vertical strips 28 mm apart whose floor follows the 0.60 radius arch circle\n"
-        "about the axle, leaving 0.13 of clearance over the tyre. The body core stops\n"
-        "at x = 0.56 and the strip out to 0.68 is arched away too, so the wheel well\n"
+        "about the axle, leaving 0.13 of clearance over the tyre. The soffit of that\n"
+        "sweep is the one curved face on the panel and carries smooth normals aimed\n"
+        "at the axle, so the well ceiling shades continuously instead of in strips.\n"
+        "The body core stops at x = 0.56 and the strip out to 0.68 is arched away too, so the wheel well\n"
         "is a real cavity holding the suspension. Tyres are a 14-point section\n"
         "revolved in 40 segments, carcass crown at 0.450, with 20 pairs of staggered\n"
         "tread lugs standing 20 mm proud to reach the 0.470 rolling radius. Coil\n"
