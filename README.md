@@ -1,8 +1,10 @@
 # Rendering
 
-Models: `ak47`, `crank_slider`, `humvee`, `humvee_v2`, `humvee_v3`, `penguin`, `torus_knot`.
+Models: `ak47`, `crank_slider`, `humvee`, `humvee_v2`, `humvee_v3`, `humvee_v3_anim`, `penguin`, `torus_knot`.
 
 `humvee_v3` is `humvee_v2`'s geometry surfaced with procedural camouflage and with lit lamps. `humvee_v2` stays flat-shaded, because a critique has to read form from shading and camouflage is what most gets in the way of that.
+
+`humvee_v3_anim` is `humvee_v3` in motion: spinning wheels, sweeping wipers, a bending whip antenna, flashing lamps, transparent windows over a modelled cab interior, and a body that shakes and jumps over a road profile it drives along. Review it with `ANIM=1 tools/review.sh humvee_v3_anim`; a turntable of one frozen pose cannot answer whether a joint stays connected.
 
 ## Build
 

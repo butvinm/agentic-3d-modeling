@@ -1,0 +1,9 @@
+ref_01.jpg	https://commons.wikimedia.org/wiki/Special:FilePath/1992%20AM%20General%20M998%20HUMVEE%20(34349306050).jpg
+ref_02.jpg	https://commons.wikimedia.org/wiki/Special:FilePath/AM%20General%20M998%20FMO%2012.06.22%20JM%20(1).jpg
+ref_03.jpg	https://commons.wikimedia.org/wiki/Special:FilePath/AM%20General%20M998%20FMO%2012.06.22%20JM%20(3).jpg
+ref_04.jpg	https://commons.wikimedia.org/wiki/Special:FilePath/HMMWV%20M998%20in%20Kyiv.jpg
+ref_05.jpg	https://commons.wikimedia.org/wiki/Special:FilePath/ROCA%20M998%20Display%20in%20Gangshan%20Air%20Force%20Base%2020111015a.jpg
+ref_06.jpg	https://commons.wikimedia.org/wiki/Special:FilePath/AM%20General%20M1025%20HMMWV%20(49366844998).jpg
+ref_07.jpg	https://commons.wikimedia.org/wiki/Special:FilePath/HMMWV%20armament%20carrier%20M1025.jpg
+ref_08.jpg	https://upload.wikimedia.org/wikipedia/commons/b/b5/M_998_w.MG_2.jpg
+ref_09.jpg	https://upload.wikimedia.org/wikipedia/commons/6/68/Two_camoflagued_HMMWV_bonnets.jpg
