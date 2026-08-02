@@ -37,7 +37,7 @@ After a fresh clone: `git submodule update --init` then `make`.
 
 ```c
 const Scene SCENE = {
-    .name = "cart",           // also the PNG filename stem
+    .name = "humvee",         // also the PNG filename stem
     .description = "...",     // written verbatim to description.txt beside the renders
     .init = Init,             // build meshes here, not at file scope: needs a GL context
     .draw = Draw,             // optional if .parts is set; called inside BeginMode3D
@@ -65,10 +65,14 @@ A model may split itself into named parts so each can be reviewed without the re
 
 ```c
 static const Part PARTS[] = {
-    { .name = "body", .draw = DrawBody, .bounds = BodyBounds },
-    { .name = "wheels", .draw = DrawWheels, .bounds = WheelBounds },
+    { .name = "doors", .draw = DrawDoors, .bounds = DoorsBounds },
+    { .name = "running_gear", .draw = DrawGear, .bounds = GearBounds },
 };
 ```
+
+**Split by physical part, not by material.** `models/humvee.c` emits into six shared material meshes (body, dark, metal, glass, lamp, tail) but exposes eight physical groups (hull, cab, bed, front, rear, doors, windshield, running_gear). Each group builds its own set of material meshes, so `--part running_gear` yields wheels and axles rather than "everything painted dark". A material split would be cheaper and useless: nobody asks to review "the dark parts".
+
+**Derive `bounds` from the built mesh, not from hand-written constants.** `models/humvee.c` unions `GetModelBoundingBox` over each group's meshes during `init` and stores the result, so the framing cannot drift out of sync when the geometry changes.
 
 `--part NAME` draws only that part and frames the camera from its `bounds` callback, so a small part fills the view instead of appearing as a speck at the model's usual orbit distance. `bounds` is optional; without it the part is drawn at the scene's normal framing.
 
@@ -89,8 +93,6 @@ Prefer parts over separate model files once a model has more than two or three d
 **Allocate mesh arrays with `MemAlloc`**, because `UnloadMesh` frees them with raylib's allocator. Call `UploadMesh` before `LoadModelFromMesh`, and let `UnloadModel` free everything.
 
 **Winding is counter-clockwise for front faces**; backface culling is on. A model that renders hollow or inside-out from some angles has its triangle indices reversed.
-
-**`GenMeshCylinder` builds along +Y starting at the origin**, not centred. Rotating it +90 degrees about X lays it along +Z, which is how `models/cart.c` places wheels and axles.
 
 **Derive curve frames analytically when you can.** `models/torus_knot.c` sweeps a circular cross-section along a curve using a Frenet frame built from exact first and second derivatives. Second-order finite differences in `float` are the trap: at `h ~ 0.001` the second difference lands near float32's precision floor and the frame normal becomes dominated by noise.
 
