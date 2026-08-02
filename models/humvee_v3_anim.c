@@ -321,14 +321,16 @@ static void RevolveX(Builder *b, Vector3 centre, const Vector2 *prof, int n, int
 typedef enum {
     MAT_BODY, MAT_DARK, MAT_CABIN, MAT_METAL, MAT_MIRROR, MAT_GLASS,
     MAT_LAMP, MAT_TAIL, MAT_AMBER,
-    MAT_GLOW_W, MAT_GLOW_R, MAT_GLOW_A, MAT_COUNT
+    MAT_GLOW_W, MAT_GLOW_R, MAT_GLOW_A, MAT_DUST, MAT_COUNT
 } MatId;
 
-typedef enum { PASS_OPAQUE, PASS_GLASS, PASS_GLOW, PASS_COUNT } Pass;
+typedef enum { PASS_OPAQUE, PASS_GLASS, PASS_GLOW, PASS_DUST, PASS_COUNT } Pass;
 
+// Dust draws after the haloes rather than with the glass, because a cloud between the camera and a lamp veils it; drawn before, the additive halo would come back over the top of the dust in front of it.
 static const Pass MAT_PASS[MAT_COUNT] = {
     [MAT_GLASS] = PASS_GLASS,
     [MAT_GLOW_W] = PASS_GLOW, [MAT_GLOW_R] = PASS_GLOW, [MAT_GLOW_A] = PASS_GLOW,
+    [MAT_DUST] = PASS_DUST,
 };
 
 // Every surface carries a map, so the colour lives in the texels and the material tint stays white; multiplying a coloured map by a coloured tint would darken it twice.
@@ -347,6 +349,8 @@ static const Color MAT_COLOR[MAT_COUNT] = {
     [MAT_GLOW_W] = { 255, 236, 180, 255 },
     [MAT_GLOW_R] = { 255,  48,  30, 255 },
     [MAT_GLOW_A] = { 255, 140,  20, 255 },
+    // Dust keeps a full alpha here and takes it from the per-puff tint instead: DrawModel multiplies the two, and every puff needs its own.
+    [MAT_DUST]   = WHITE,
 };
 
 static const bool MAT_UNLIT[MAT_COUNT] = {
@@ -356,6 +360,7 @@ static const bool MAT_UNLIT[MAT_COUNT] = {
 
 static Texture2D MAT_TEX[MAT_COUNT];
 static Shader gGlassShader;
+static Shader gDustShader;
 
 // ---------------------------------------------------------------------------
 // Glass shader
@@ -415,6 +420,36 @@ static const char *GLASS_FS =
     "    vec3 col = texel.rgb*colDiffuse.rgb*lam + vec3(0.09)*fres + vec3(0.55)*spec;\n"
     "    float a = clamp(colDiffuse.a*texel.a + 0.34*fres + spec, 0.0, 1.0);\n"
     "    finalColor = vec4(pow(col, vec3(1.0/2.2)), a);\n"
+    "}\n";
+
+// ---------------------------------------------------------------------------
+// Dust shader
+//
+// A puff is a closed blob, and a closed blob has a hard silhouette wherever you put it, however finely it is subdivided. Piling up many faint ones hides that in the middle of a plume but not at its edge, where a single blob is still a grey pebble with a polygonal rim.
+// The fix is a per-fragment falloff, which is the one thing this file can afford that a fixed shader pipeline cannot express: alpha is scaled by how squarely the surface faces the camera, and a blob's silhouette is exactly where it faces the camera edge-on. So every puff fades out at its own rim on its own, and the edge of the plume is soft rather than pebbled.
+// The blob's normals are radial -- the normal of the sphere the lumps are pushed out from, not of the lumpy surface -- which is deliberate here. A radial normal makes the falloff monotonic to the underlying sphere's silhouette, where a true normal would put a ring of zero alpha inside the real edge wherever a lump bulged past it.
+// Shading is a hemisphere ramp off that same radial normal: dust is lit from the sky, so the top of a puff is brighter than its underside, and unlit geometry has to be told so.
+// ---------------------------------------------------------------------------
+
+static const char *DUST_FS =
+    "#version 330\n"
+    "in vec3 fragPosition;\n"
+    "in vec2 fragTexCoord;\n"
+    "in vec3 fragNormal;\n"
+    "uniform sampler2D texture0;\n"
+    "uniform vec4 colDiffuse;\n"
+    "uniform mat4 matView;\n"
+    "out vec4 finalColor;\n"
+    "void main()\n"
+    "{\n"
+    "    vec3 eye = -(transpose(mat3(matView))*vec3(matView[3]));\n"
+    "    vec3 v = normalize(eye - fragPosition);\n"
+    "    vec3 n = normalize(fragNormal);\n"
+    "    float edge = pow(clamp(abs(dot(n, v)), 0.0, 1.0), 1.25);\n"
+    "    float sky = 0.46 + 0.54*(0.5 + 0.5*n.y);\n"
+    "    vec4 texel = texture(texture0, fragTexCoord);\n"
+    "    vec3 col = texel.rgb*colDiffuse.rgb*sky;\n"
+    "    finalColor = vec4(pow(col, vec3(1.0/2.2)), colDiffuse.a*texel.a*edge);\n"
     "}\n";
 
 // ---------------------------------------------------------------------------
@@ -612,6 +647,23 @@ static Texture2D MakeLensTexture(Color hot, Color rim)
     return Upload(img, TEXTURE_WRAP_CLAMP);
 }
 
+// Dry track dust: a warm pale tan with a coarse mottle, so a puff has some tooth rather than reading as an airbrushed ball.
+// Light on purpose. It is drawn unlit against a dark background, and this is the only place its colour is set.
+static Texture2D MakeDustTexture(void)
+{
+    const int S = 256;
+    Image img = NewImage(S);
+    Color *px = (Color *)img.data;
+    for (int y = 0; y < S; y++) {
+        for (int x = 0; x < S; x++) {
+            float u = (float)x / (float)S, v = (float)y / (float)S;
+            float d = (Fbm(u, v, 8, 137u, 3) - 0.5f) * 46.0f;
+            px[y * S + x] = Shade((Color){ 152, 113, 62, 255 }, d);
+        }
+    }
+    return Upload(img, TEXTURE_WRAP_REPEAT);
+}
+
 // Radial falloff for the haloes: white throughout, with only the alpha varying, so the tint on the material decides the colour of the glow.
 // Squared falloff gives a bright core with a soft skirt; a linear ramp reads as a flat disc with a hard edge.
 static Texture2D MakeGlowTexture(void)
@@ -645,10 +697,16 @@ static void MakeTextures(void)
     MAT_TEX[MAT_GLOW_W] = MakeGlowTexture();
     MAT_TEX[MAT_GLOW_R] = MAT_TEX[MAT_GLOW_W];
     MAT_TEX[MAT_GLOW_A] = MAT_TEX[MAT_GLOW_W];
+    MAT_TEX[MAT_DUST] = MakeDustTexture();
 
+    // Both shaders share GLASS_VS: it forwards position, texcoord and normal, which is all either fragment stage needs.
     gGlassShader = LoadShaderFromMemory(GLASS_VS, GLASS_FS);
     if (gGlassShader.id == 0) {
         TraceLog(LOG_WARNING, "humvee_v3_anim: glass shader failed to build, windows will render opaque");
+    }
+    gDustShader = LoadShaderFromMemory(GLASS_VS, DUST_FS);
+    if (gDustShader.id == 0) {
+        TraceLog(LOG_WARNING, "humvee_v3_anim: dust shader failed to build, puffs will render as opaque pebbles");
     }
 }
 
@@ -660,13 +718,16 @@ static void UnloadTextures(void)
         if (MAT_TEX[m].id != 0) UnloadTexture(MAT_TEX[m]);
     }
     if (gGlassShader.id != 0) UnloadShader(gGlassShader);
+    if (gDustShader.id != 0) UnloadShader(gDustShader);
 }
 
 // ---------------------------------------------------------------------------
 // Groups
 //
 // A group is one rigid node: a set of per-material meshes that share a transform and a tint, plus the local bounding box the transform acts on.
-// v3 had five, one per review part. This file has twenty-one, because a part that has to move alone has to be its own mesh.
+// v3 had five, one per review part. This file has twenty-six, because a part that has to move alone has to be its own mesh.
+//
+// One group is instanced rather than posed. A dust puff differs from its neighbours only in where it is, how big it has grown and how faded it is, so the dust is one blob mesh with a list of transforms and alphas beside it; building two hundred meshes to say that would be two hundred copies of the same statement. Everything else -- bounds, unloading, part isolation, the draw passes -- then works on it unchanged.
 // ---------------------------------------------------------------------------
 
 typedef struct {
@@ -677,6 +738,9 @@ typedef struct {
     Matrix xform;
     Color tint[MAT_COUNT];
     bool dynamic;            // mesh buffers are rewritten every frame
+    const Matrix *inst;      // if set, the meshes are drawn once per instance instead of once at xform
+    const float *instAlpha;
+    int instCount;
 } Group;
 
 typedef struct {
@@ -738,6 +802,7 @@ static void GroupFinish(Group *g, const char *name)
         g->model[m].materials[0].maps[MATERIAL_MAP_DIFFUSE].color = MAT_COLOR[m];
         if (MAT_TEX[m].id != 0) g->model[m].materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = MAT_TEX[m];
         if (MAT_PASS[m] == PASS_GLASS && gGlassShader.id != 0) g->model[m].materials[0].shader = gGlassShader;
+        else if (MAT_PASS[m] == PASS_DUST && gDustShader.id != 0) g->model[m].materials[0].shader = gDustShader;
         else if (!MAT_UNLIT[m]) HarnessApplyLighting(&g->model[m]);
         g->has[m] = true;
     }
@@ -746,10 +811,23 @@ static void GroupFinish(Group *g, const char *name)
 }
 
 // One pass over one group. The caller owns the blend and depth state for the pass, because a pass spans every group in the scene rather than stopping at this one.
+// An instanced group draws its meshes once per live instance, with that instance's alpha folded into the tint; DrawModel multiplies material colour by tint, so the material keeps a full alpha and the per-instance one arrives here.
 static void GroupDrawPass(Group *g, Pass pass)
 {
     for (int m = 0; m < MAT_COUNT; m++) {
         if (!g->has[m] || MAT_PASS[m] != pass) continue;
+
+        if (g->instCount > 0) {
+            for (int i = 0; i < g->instCount; i++) {
+                if (g->instAlpha[i] <= 0.004f) continue;
+                g->model[m].transform = g->inst[i];
+                DrawModel(g->model[m], Vector3Zero(), 1.0f, (Color){
+                    g->tint[m].r, g->tint[m].g, g->tint[m].b,
+                    (unsigned char)Clamp(g->instAlpha[i] * 255.0f, 0.0f, 255.0f) });
+            }
+            continue;
+        }
+
         g->model[m].transform = g->xform;
         DrawModel(g->model[m], Vector3Zero(), 1.0f, g->tint[m]);
     }
@@ -766,9 +844,9 @@ static void GroupRegister(Group *g)
     else TraceLog(LOG_ERROR, "humvee_v3_anim: more than %d groups", MAX_GROUPS);
 }
 
-// Opaque first, then glass, then the haloes.
-// Glass runs with depth writes off so two panes in line both blend rather than the nearer one masking the further; depth testing stays on, so bodywork in front still hides it.
-// The haloes are summed into the frame for the same reason v3 gave: left writing depth, the nearer of two overlapping discs would occlude the further and the pair would read as a step rather than as one brighter patch.
+// Opaque first, then glass, then the haloes, then the dust.
+// Everything after the first pass runs with depth writes off: two panes in line should both blend rather than the nearer one masking the further, two haloes should read as one brighter patch rather than as a step, and two puffs should pile up rather than the nearest-drawn one punching a hole in the ones behind it. Depth testing stays on throughout, so bodywork in front of any of them still hides it.
+// Dust goes last so a cloud between the camera and the truck veils the lamps rather than the other way round.
 static void DrawGroups(Group *const *gs, int n)
 {
     for (int i = 0; i < n; i++) GroupDrawPass(gs[i], PASS_OPAQUE);
@@ -778,6 +856,7 @@ static void DrawGroups(Group *const *gs, int n)
     BeginBlendMode(BLEND_ADDITIVE);
     for (int i = 0; i < n; i++) GroupDrawPass(gs[i], PASS_GLOW);
     EndBlendMode();
+    for (int i = 0; i < n; i++) GroupDrawPass(gs[i], PASS_DUST);
     rlEnableDepthMask();
 }
 
@@ -1623,8 +1702,11 @@ static void BuildSusp(void)
 
 #define BUMP1_S       (0.30f * ROAD_PERIOD)
 #define BUMP2_S       (0.68f * ROAD_PERIOD)
-#define BUMP1_T       ((BUMP1_S - AXLE_F) / SPEED)
-#define BUMP2_T       ((BUMP2_S - AXLE_F) / SPEED)
+// How far down the road the truck already is at t = 0.
+// This exists to put the jump on phase 0. --anim samples N evenly spaced phases, so a 0.19 s event in a 4 s loop is caught only by luck; phase 0 is the one phase every --frames value lands on, and it is also the pose --part renders. Sliding the whole road rather than moving one obstacle keeps the profile, the ring-down and the lamp cues in the relationship they were tuned in.
+#define ROAD_LEAD     1.100f
+#define BUMP1_T       ((BUMP1_S - AXLE_F) / SPEED - ROAD_LEAD)
+#define BUMP2_T       ((BUMP2_S - AXLE_F) / SPEED - ROAD_LEAD)
 
 static float LoopWrap(float v, float period)
 {
@@ -1696,7 +1778,7 @@ static float Tremble(float t, float amp, float harmonic, float phase)
 // Where the body is, before the wheels are consulted.
 static Matrix ChassisFree(float t)
 {
-    float s = SPEED * t;
+    float s = SPEED * (t + ROAD_LEAD);
     float f[CORNERS];
     for (int i = 0; i < CORNERS; i++) f[i] = RoadFiltered(s + CornerZ(i), CornerSide(i));
 
@@ -1743,6 +1825,8 @@ static Matrix ChassisAt(float t)
 typedef struct {
     Matrix chassis;
     float travel[CORNERS];
+    float clear[CORNERS];    // gap from that tyre's lowest point down to the ground plane; zero means it is on it
+    Vector3 patch[CORNERS];  // where that tyre meets the ground, which is where its dust comes from
     float spin;
     float wiper;     // radians away from the parked angle
     float bendX, bendZ;
@@ -1770,9 +1854,15 @@ static Pose PoseFor(float t)
     Pose p = { 0 };
     p.chassis = ChassisAt(t);
 
+    // The wheel's axis is the body's x axis, tilted by roll and yaw; the lowest point of a circle of radius R about a unit axis a sits R*sqrt(1 - a.y^2) below its centre.
+    float ay = p.chassis.m1;
+    float drop = TIRE_R * sqrtf(fmaxf(0.0f, 1.0f - ay * ay));
     for (int i = 0; i < CORNERS; i++) {
-        float need = TIRE_R - Vector3Transform(HubRest(i), p.chassis).y;
+        Vector3 hub = Vector3Transform(HubRest(i), p.chassis);
+        float need = TIRE_R - hub.y;
         p.travel[i] = Clamp(need, -SUSP_DOWN, SUSP_UP);
+        p.clear[i] = hub.y + p.travel[i] - drop;
+        p.patch[i] = (Vector3){ hub.x, 0.0f, hub.z };
     }
 
     p.spin = 2.0f * PI * WHEEL_TURNS * t / CYCLE;
@@ -1797,6 +1887,159 @@ static Pose PoseFor(float t)
     // Tail lamps sit at running-light brightness and come up to brake brightness on the approach to the obstacle.
     p.tail = 0.42f + 0.58f * Gaussian(LoopWrapSigned(t - BUMP1_T + 0.25f, CYCLE), 0.30f);
     return p;
+}
+
+// ---------------------------------------------------------------------------
+// Dust
+//
+// One lumpy unit blob, drawn once per puff with a scale, a yaw and a translation, because a puff differs from its neighbours only in where it is, how big it has grown and how faded it is.
+// The blob is only rotated about the vertical. A puff's shading is a hemisphere ramp off its own normal, so tumbling it would tumble the ramp with it and light the underside of some puffs from below; yaw plus a per-puff non-uniform scale varies the silhouette without touching which way is up.
+//
+// The plume is fed from the contact patches, and only while there is a contact patch to feed it. A wheel that has left the ground throws nothing, so the loop's one jump tears a real gap in the plume and the landing puts a heavier burst down than cruising does. That gate is the reason to spend the pose's contact state on this rather than to sprinkle puffs on a timer.
+//
+// Rearward speed is the wake's, not the road's. In the truck's frame the ground runs backwards at the full 6.64 m/s, but a bluff body drags a large volume of air along with it, so dust released into that wake falls behind far more slowly than the road does. Modelled as a first-order decay to a terminal displacement, the same shape as the antenna's drag: a puff has shed most of its speed within a few tenths of a second and then hangs.
+//
+// Dust that behaved honestly would still be hanging there at the end of the cycle, and a repeating loop would silt up with it. Each puff therefore fades to nothing inside its life, which is a concession to looping and not a claim about dust.
+// ---------------------------------------------------------------------------
+
+#define DUST_PER_WHEEL 110
+#define DUST_COUNT     (CORNERS * DUST_PER_WHEEL)
+#define DUST_LIFE      0.85f    // seconds a puff lasts; shorter than the cycle, so nothing survives the seam
+#define DUST_DRAG      0.52f    // seconds for a puff to shed its speed relative to the truck
+
+typedef struct {
+    float born;        // phase of the cycle at which it leaves the contact patch
+    Vector3 offset;    // where on the patch, in the body's frame
+    Vector3 drift;     // metres per second, in the body's frame, before drag
+    float r0, grow;    // metres, and metres per second
+    Vector3 shape;     // relative axis lengths, so one mesh does not read as one ball repeated
+    float yaw;
+    float peak;        // alpha at its strongest, before the contact gate scales it
+    // Resolved once at build time: the birth phases are fixed, so the pose at each of them is a constant and re-deriving it every frame would cost 224 evaluations of the whole road model per frame.
+    bool emits;        // was that tyre on the ground at all when this puff was due
+    Vector3 from;      // world point it leaves from
+    float load;        // how hard the tyre was pressed into the ground, which scales the plume
+} DustSpec;
+
+static DustSpec gDustSpec[DUST_COUNT];
+static Matrix gDustX[DUST_COUNT];
+static float gDustA[DUST_COUNT];
+static Group gDust;
+
+// Deterministic variation, from the same lattice hash the diffuse maps are built from, so the plume is identical on every run and a critique of frame 3 still refers to the same frame 3 tomorrow.
+static float DustRand(int i, int k)
+{
+    return Hash2(i, k, 64, 2411u);
+}
+
+static void MakeDust(void)
+{
+    for (int c = 0; c < CORNERS; c++) {
+        float side = CornerSide(c);
+        bool rear = CornerZ(c) < 0.0f;
+        for (int j = 0; j < DUST_PER_WHEEL; j++) {
+            int i = c * DUST_PER_WHEEL + j;
+            DustSpec *s = &gDustSpec[i];
+
+            // Births evenly spread over the loop, jittered, so the plume is a stream rather than a pulse.
+            s->born = CYCLE * ((float)j + 0.65f * DustRand(i, 1)) / (float)DUST_PER_WHEEL;
+
+            // Off the contact patch: spread across the tyre's width and a little behind it, since dust is thrown from where the tread leaves the ground.
+            s->offset = (Vector3){ (DustRand(i, 2) - 0.5f) * 2.0f * TIRE_HW,
+                                   0.02f + 0.10f * DustRand(i, 3),
+                                   -0.10f - 0.30f * DustRand(i, 4) };
+
+            // Backwards into the wake, outboard away from the truck's flank, and up.
+            float big = DustRand(i, 5) * DustRand(i, 6);
+            s->drift = (Vector3){ side * (0.55f + 1.30f * DustRand(i, 7)),
+                                  1.05f + 1.90f * DustRand(i, 8),
+                                  -(3.30f + 2.60f * DustRand(i, 9)) };
+            // A wide size spread on purpose. Puffs within a narrow band read as a row of repeated shells however many there are, because each contributes a silhouette of about the same radius.
+            s->r0 = 0.080f + 0.130f * big;
+            s->grow = 0.62f + 1.55f * big;
+            s->shape = (Vector3){ 0.80f + 0.45f * DustRand(i, 10),
+                                  0.62f + 0.30f * DustRand(i, 11),
+                                  0.80f + 0.45f * DustRand(i, 12) };
+            s->yaw = DustRand(i, 13) * 2.0f * PI;
+            // The rear wheels run in ground the front pair has already broken up, and throw the heavier plume for it.
+            s->peak = (rear ? 0.260f : 0.165f) * (0.70f + 0.55f * DustRand(i, 14));
+
+            // No contact patch, no dust. Loading the tyre harder throws more of it, which is what makes the landing a burst and the jump a gap.
+            Pose birth = PoseFor(s->born);
+            s->emits = birth.clear[c] <= 0.002f;
+            s->load = 0.42f + 0.58f * Clamp(birth.travel[c] / SUSP_UP, 0.0f, 1.0f);
+            s->from = Vector3Add(birth.patch[c], (Vector3){ side * s->offset.x, s->offset.y, s->offset.z });
+        }
+    }
+}
+
+// A sphere of unit radius with its radius pushed about by a few low-order harmonics, so a puff is not a billiard ball.
+// Normals are radial rather than true to the lumps, which the dust shader relies on: see the note above DUST_FS.
+static void Blob(Builder *b, int rings, int segs)
+{
+    for (int i = 0; i < rings; i++) {
+        for (int j = 0; j < segs; j++) {
+            Vector3 q[4], n[4];
+            float uv[4][2];
+            for (int c = 0; c < 4; c++) {
+                float fi = (float)(i + ((c == 2 || c == 3) ? 1 : 0));
+                float fj = (float)(j + ((c == 1 || c == 2) ? 1 : 0));
+                float phi = PI * fi / (float)rings;
+                float th = 2.0f * PI * fj / (float)segs;
+                float r = 1.0f + 0.24f * sinf(3.0f * th) * sinf(2.0f * phi)
+                               + 0.16f * cosf(5.0f * phi)
+                               + 0.13f * sinf(4.0f * th - 3.0f * phi)
+                               + 0.08f * cosf(7.0f * th + 2.0f * phi);
+                n[c] = (Vector3){ sinf(phi) * sinf(th), cosf(phi), sinf(phi) * cosf(th) };
+                q[c] = Vector3Scale(n[c], r);
+                // UVs off the sphere's own parameters rather than off world position, so the mottle does not stretch with the per-puff scale.
+                uv[c][0] = fj / (float)segs * 3.0f;
+                uv[c][1] = fi / (float)rings * 3.0f;
+            }
+            int a = VertUV(b, q[0], n[0], uv[0][0], uv[0][1]);
+            int d = VertUV(b, q[1], n[1], uv[1][0], uv[1][1]);
+            int e = VertUV(b, q[2], n[2], uv[2][0], uv[2][1]);
+            int f = VertUV(b, q[3], n[3], uv[3][0], uv[3][1]);
+            Tri(b, a, d, e);
+            Tri(b, a, e, f);
+        }
+    }
+}
+
+static void BuildDust(void)
+{
+    MakeDust();
+    Blob(&gDust.b[MAT_DUST], 12, 18);
+    GroupFinish(&gDust, "dust");
+    gDust.inst = gDustX;
+    gDust.instAlpha = gDustA;
+    gDust.instCount = DUST_COUNT;
+}
+
+// A puff is released by the truck and is then free of it, so its start point is where the contact patch was at the moment it left, and its drift runs in the body's frame at that moment too.
+static void PoseDust(float t)
+{
+    for (int i = 0; i < DUST_COUNT; i++) {
+        const DustSpec *s = &gDustSpec[i];
+        if (!s->emits) { gDustA[i] = 0.0f; continue; }
+        float age = LoopWrap(t - s->born, CYCLE);
+        if (age > DUST_LIFE) { gDustA[i] = 0.0f; continue; }
+
+        float carried = DUST_DRAG * (1.0f - expf(-age / DUST_DRAG));
+        Vector3 at = Vector3Add(s->from, Vector3Scale(s->drift, carried));
+        // Dust settles as it slows, so the vertical component is bled back off over the second half of a puff's life.
+        at.y -= 0.55f * s->drift.y * carried * (age / DUST_LIFE) * (age / DUST_LIFE);
+        if (at.y < 0.03f) at.y = 0.03f;
+
+        float r = s->r0 + s->grow * age;
+        gDustX[i] = MatrixMultiply(MatrixMultiply(
+            MatrixScale(r * s->shape.x, r * s->shape.y, r * s->shape.z), MatrixRotateY(s->yaw)),
+            MatrixTranslate(at.x, at.y, at.z));
+
+        // In fast, out slowly, and all the way out before the life is up.
+        float fade = Clamp(age / 0.05f, 0.0f, 1.0f) * (1.0f - age / DUST_LIFE) * (1.0f - age / DUST_LIFE);
+        gDustA[i] = s->peak * s->load * fade;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1850,6 +2093,7 @@ static void Update(float t)
 
     AntennaSetBend(p.bendX, p.bendZ);
     gAntenna.xform = p.chassis;
+    PoseDust(t);
 
     gFront.tint[MAT_LAMP] = gFront.tint[MAT_GLOW_W] = Dim(WHITE, p.head);
     gFront.tint[MAT_AMBER] = gFront.tint[MAT_GLOW_A] = Dim(WHITE, p.blink);
@@ -1868,6 +2112,7 @@ static Group *PART_INTERIOR[] = { &gInterior };
 static Group *PART_BED[]      = { &gBed };
 static Group *PART_WIPERS[]   = { &gWiper[0], &gWiper[1] };
 static Group *PART_ANTENNA[]  = { &gAntenna };
+static Group *PART_DUST[]     = { &gDust };
 static Group *PART_GEAR[17];
 
 #define COUNT_OF(a) ((int)(sizeof(a) / sizeof((a)[0])))
@@ -1882,15 +2127,21 @@ static BoundingBox SweptBounds(Group *const *gs, int n)
         Update(CYCLE * (float)s / (float)SAMPLES);
         for (int i = 0; i < n; i++) {
             BoundingBox b = gs[i]->bounds;
-            for (int c = 0; c < 8; c++) {
-                Vector3 p = {
-                    (c & 1) ? b.max.x : b.min.x,
-                    (c & 2) ? b.max.y : b.min.y,
-                    (c & 4) ? b.max.z : b.min.z,
-                };
-                p = Vector3Transform(p, gs[i]->xform);
-                out.min = Vector3Min(out.min, p);
-                out.max = Vector3Max(out.max, p);
+            // An instanced group is its instances; where they get to is the thing the isolated view is for.
+            int reps = (gs[i]->instCount > 0) ? gs[i]->instCount : 1;
+            for (int k = 0; k < reps; k++) {
+                if (gs[i]->instCount > 0 && gs[i]->instAlpha[k] <= 0.004f) continue;
+                Matrix m = (gs[i]->instCount > 0) ? gs[i]->inst[k] : gs[i]->xform;
+                for (int c = 0; c < 8; c++) {
+                    Vector3 p = {
+                        (c & 1) ? b.max.x : b.min.x,
+                        (c & 2) ? b.max.y : b.min.y,
+                        (c & 4) ? b.max.z : b.min.z,
+                    };
+                    p = Vector3Transform(p, m);
+                    out.min = Vector3Min(out.min, p);
+                    out.max = Vector3Max(out.max, p);
+                }
             }
         }
     }
@@ -1898,7 +2149,7 @@ static BoundingBox SweptBounds(Group *const *gs, int n)
     return out;
 }
 
-static BoundingBox bHull, bFront, bCab, bInterior, bBed, bGear, bWipers, bAntenna;
+static BoundingBox bHull, bFront, bCab, bInterior, bBed, bGear, bWipers, bAntenna, bDust;
 
 static void DrawAll(void) { DrawGroups(gAll, gAllCount); }
 static void DrawHull(void) { DrawGroups(PART_HULL, COUNT_OF(PART_HULL)); }
@@ -1909,6 +2160,7 @@ static void DrawBed(void) { DrawGroups(PART_BED, COUNT_OF(PART_BED)); }
 static void DrawGear(void) { DrawGroups(PART_GEAR, COUNT_OF(PART_GEAR)); }
 static void DrawWipers(void) { DrawGroups(PART_WIPERS, COUNT_OF(PART_WIPERS)); }
 static void DrawAntenna(void) { DrawGroups(PART_ANTENNA, COUNT_OF(PART_ANTENNA)); }
+static void DrawDust(void) { DrawGroups(PART_DUST, COUNT_OF(PART_DUST)); }
 
 static BoundingBox HullBounds(void) { return bHull; }
 static BoundingBox FrontBounds(void) { return bFront; }
@@ -1918,6 +2170,7 @@ static BoundingBox BedBounds(void) { return bBed; }
 static BoundingBox GearBounds(void) { return bGear; }
 static BoundingBox WiperBounds(void) { return bWipers; }
 static BoundingBox AntennaBounds(void) { return bAntenna; }
+static BoundingBox DustBounds(void) { return bDust; }
 
 static const Part PARTS[] = {
     { .name = "hull", .draw = DrawHull, .bounds = HullBounds },
@@ -1928,6 +2181,7 @@ static const Part PARTS[] = {
     { .name = "running_gear", .draw = DrawGear, .bounds = GearBounds },
     { .name = "wipers", .draw = DrawWipers, .bounds = WiperBounds },
     { .name = "antenna", .draw = DrawAntenna, .bounds = AntennaBounds },
+    { .name = "dust", .draw = DrawDust, .bounds = DustBounds },
 };
 
 // ---------------------------------------------------------------------------
@@ -1954,26 +2208,23 @@ static void CheckDoorClearsScreen(void)
 // Claim: no tyre ever goes through the ground the grid draws, and at least one is on it except while the truck is off the big bump.
 static void CheckGroundContact(void)
 {
-    float deepest = 1e9f, highest = -1e9f;
+    float deepest = 1e9f, highest = -1e9f, peakT = 0.0f;
     float airborne = 0.0f;
-    const int N = 720;
+    const int N = 1440;
     for (int k = 0; k < N; k++) {
         float t = CYCLE * (float)k / (float)N;
         Pose p = PoseFor(t);
-        // The wheel's axis is the body's x axis, tilted by roll and yaw; the lowest point of a circle of radius R about a unit axis a sits R*sqrt(1 - a.y^2) below its centre.
-        float ay = p.chassis.m1;
-        float drop = TIRE_R * sqrtf(fmaxf(0.0f, 1.0f - ay * ay));
         float lowest = 1e9f;
         for (int i = 0; i < CORNERS; i++) {
-            float y = Vector3Transform(HubRest(i), p.chassis).y + p.travel[i] - drop;
-            if (y < lowest) lowest = y;
+            if (p.clear[i] < lowest) lowest = p.clear[i];
         }
         if (lowest < deepest) deepest = lowest;
-        if (lowest > highest) highest = lowest;
+        if (lowest > highest) { highest = lowest; peakT = t; }
         if (lowest > 0.002f) airborne += CYCLE / (float)N;
     }
-    TraceLog(LOG_INFO, "humvee_v3_anim: tyre contact runs from %+.4f m to %+.4f m, airborne for %.2f s of %.1f",
-             deepest, highest, airborne, CYCLE);
+    // Where the jump falls matters as much as that it happens: --anim samples N evenly spaced phases, and a 0.2 s event in a 4 s loop is caught only by luck unless it sits on a phase every sensible --frames lands on.
+    TraceLog(LOG_INFO, "humvee_v3_anim: tyre contact runs from %+.4f m to %+.4f m, airborne for %.2f s of %.1f, peaking at phase %.3f",
+             deepest, highest, airborne, CYCLE, peakT / CYCLE);
     if (deepest < -0.001f) {
         TraceLog(LOG_WARNING, "humvee_v3_anim: a tyre reaches %.4f m through the ground plane", deepest);
     }
@@ -2010,17 +2261,18 @@ static void CheckLoopCloses(void)
     for (int i = 0; i < 16; i++) worst = fmaxf(worst, fabsf(ma[i] - mb[i]));
     for (int i = 0; i < CORNERS; i++) worst = fmaxf(worst, fabsf(a.travel[i] - b.travel[i]));
     worst = fmaxf(worst, fabsf(a.wiper - b.wiper));
-    worst = fmaxf(worst, fabsf(a.bendX - b.bendX));
-    worst = fmaxf(worst, fabsf(a.bendZ - b.bendZ));
     worst = fmaxf(worst, fabsf(a.head - b.head));
     worst = fmaxf(worst, fabsf(a.tail - b.tail));
+
+    // The antenna bend is held to a looser tolerance, and it has to be. It is a second difference over a 10 ms step, so it multiplies whatever the chassis matrix fails to close by 1/h^2 = 1e4, and the chassis closes to 3.5e-08, which is float epsilon at this magnitude rather than anything the model can tighten. 1e-3 rad is 0.06 degrees, half a millimetre at the tip; anything larger would mean a genuinely aperiodic term rather than the noise floor.
+    float bend = fmaxf(fabsf(a.bendX - b.bendX), fabsf(a.bendZ - b.bendZ));
     // The spin is an angle, so it only has to come back to the same place modulo a whole turn.
     float turns = (b.spin - a.spin) / (2.0f * PI);
     float slip = fabsf(turns - roundf(turns));
 
-    TraceLog(LOG_INFO, "humvee_v3_anim: loop closes to %.2e, wheel to %.2e of a turn", worst, slip);
-    if (worst > 1e-4f || slip > 1e-4f) {
-        TraceLog(LOG_WARNING, "humvee_v3_anim: pose does not close over the cycle (%.2e, wheel %.2e turns)", worst, slip);
+    TraceLog(LOG_INFO, "humvee_v3_anim: loop closes to %.2e, antenna to %.2e rad, wheel to %.2e of a turn", worst, bend, slip);
+    if (worst > 1e-4f || slip > 1e-4f || bend > 1e-3f) {
+        TraceLog(LOG_WARNING, "humvee_v3_anim: pose does not close over the cycle (%.2e, antenna %.2e, wheel %.2e turns)", worst, bend, slip);
     }
 }
 
@@ -2044,6 +2296,35 @@ static void CheckHalfShaft(void)
     TraceLog(LOG_INFO, "humvee_v3_anim: half shaft end sits %.3f m inside the hub carrier at worst", worst);
     if (worst < 0.0f) {
         TraceLog(LOG_WARNING, "humvee_v3_anim: half shaft end leaves the hub carrier by %.3f m", -worst);
+    }
+}
+
+// Claim: dust only ever leaves a tyre that is on the ground, and the plume clears the loop's seam instead of silting up.
+// Also a number worth having: how many puffs are alive at once, since the whole technique rests on many faint ones overlapping rather than a few solid ones.
+static void CheckDust(void)
+{
+    int emitters = 0, gated = 0, mostAlive = 0;
+    float far = 0.0f, high = 0.0f;
+    for (int i = 0; i < DUST_COUNT; i++) {
+        if (gDustSpec[i].emits) emitters++;
+        else gated++;
+    }
+    for (int k = 0; k < 240; k++) {
+        Update(CYCLE * (float)k / 240.0f);
+        int alive = 0;
+        for (int i = 0; i < DUST_COUNT; i++) {
+            if (gDustA[i] <= 0.004f) continue;
+            alive++;
+            far = fmaxf(far, -(gDustX[i].m14 - TAIL_Z));
+            high = fmaxf(high, gDustX[i].m13);
+        }
+        if (alive > mostAlive) mostAlive = alive;
+    }
+    Update(0.0f);
+    TraceLog(LOG_INFO, "humvee_v3_anim: dust emits %d puffs of %d, %d gated off airborne tyres, at most %d alive, reaching %.2f m past the tail and %.2f m up",
+             emitters, DUST_COUNT, gated, mostAlive, far, high);
+    if (gated == 0) {
+        TraceLog(LOG_WARNING, "humvee_v3_anim: no dust puff was gated by wheel contact, so the jump leaves no gap in the plume");
     }
 }
 
@@ -2089,6 +2370,7 @@ static void Init(void)
     BuildWiper(&gWiper[0], WIPER_PIVOT_X);
     BuildWiper(&gWiper[1], -WIPER_PIVOT_X);
     BuildAntenna();
+    BuildDust();
 
     GroupRegister(&gHull);
     GroupRegister(&gFront);
@@ -2111,6 +2393,7 @@ static void Init(void)
     GroupRegister(&gWiper[0]);
     GroupRegister(&gWiper[1]);
     GroupRegister(&gAntenna);
+    GroupRegister(&gDust);
 
     bHull = SweptBounds(PART_HULL, COUNT_OF(PART_HULL));
     bFront = SweptBounds(PART_FRONT, COUNT_OF(PART_FRONT));
@@ -2120,12 +2403,14 @@ static void Init(void)
     bGear = SweptBounds(PART_GEAR, COUNT_OF(PART_GEAR));
     bWipers = SweptBounds(PART_WIPERS, COUNT_OF(PART_WIPERS));
     bAntenna = SweptBounds(PART_ANTENNA, COUNT_OF(PART_ANTENNA));
+    bDust = SweptBounds(PART_DUST, COUNT_OF(PART_DUST));
 
     CheckDoorClearsScreen();
     CheckGroundContact();
     CheckWiperSweep();
     CheckLoopCloses();
     CheckHalfShaft();
+    CheckDust();
     CheckSuspension();
 }
 
@@ -2151,11 +2436,15 @@ const Scene SCENE = {
         "blink at 1.25 Hz, the tail lamps come up from running to brake brightness on\n"
         "the approach to the obstacle, and the headlamps flicker twice on landing. The\n"
         "body heaves, pitches, rolls, yaws and shivers throughout, and leaves the\n"
-        "ground once per loop.\n"
+        "ground once per loop. The wheels throw dust the whole time they are on it.\n"
+        "\n"
+        "The jump is on phase 0 of the loop, which is the one phase every --frames\n"
+        "value samples and the pose --part renders. It lasts 0.20 s of the four\n"
+        "seconds, so anywhere else it would be caught only by luck.\n"
         "\n"
         "How the shake is generated: a periodic road profile 26.6 m long, four sine\n"
         "harmonics plus a per-track difference plus two gaussian obstacles, one of them\n"
-        "0.150 m high and mostly under the right-hand track. It is sampled at the four\n"
+        "0.220 m high and mostly under the right-hand track. It is sampled at the four\n"
         "contact patches, low-passed over a 0.9 m window because neither a 0.324 m tyre\n"
         "footprint nor a spring can follow anything shorter, and resolved into heave,\n"
         "pitch and roll about a pivot 0.85 m up. Two damped sines per obstacle add the\n"
@@ -2169,6 +2458,30 @@ const Scene SCENE = {
         "Where even full compression would not reach, the whole body is raised, so no\n"
         "tyre ever passes through the grid plane; where full droop will not reach, the\n"
         "truck is genuinely off the ground. Both are measured at build time and logged.\n"
+        "\n"
+        "Dust: 440 puffs, 110 per wheel, born evenly across the loop from that wheel's\n"
+        "contact patch and living 0.85 s. One lumpy blob mesh of unit radius, drawn per\n"
+        "puff with a scale, a yaw and a translation; it is only yawed, because a puff\n"
+        "is shaded by a hemisphere ramp off its own normal and tumbling it would light\n"
+        "some undersides from above. A puff is thrown backwards, outboard and up, and\n"
+        "sheds that speed as a first-order decay to a terminal displacement, so the\n"
+        "plume reaches 2.2 m past the tailgate and 0.85 m up and then hangs; the wake\n"
+        "behind a bluff body moves with it, which is why dust falls behind far more\n"
+        "slowly than the 6.64 m/s the road does. Each puff fades to nothing inside its\n"
+        "life, which is a concession to the loop rather than a claim about dust.\n"
+        "\n"
+        "Emission is gated on contact. A wheel that has left the ground throws nothing,\n"
+        "so the jump tears a real gap in the plume, and a tyre pressed harder into the\n"
+        "ground throws more, so the landing is a burst. 40 of the 440 puffs are gated\n"
+        "off by that, and at most 78 are alive at once.\n"
+        "\n"
+        "The soft edge is a second small shader. A closed blob has a hard silhouette at\n"
+        "any subdivision, and piling up faint ones hides that in the middle of a plume\n"
+        "but not at its rim, where one blob is still a pebble. So a puff's alpha is\n"
+        "scaled by how squarely its surface faces the camera, which is zero exactly at\n"
+        "its own silhouette. Its normals are radial -- of the sphere the lumps are\n"
+        "pushed out from rather than of the lumpy surface -- so that falloff runs\n"
+        "monotonically to the edge instead of leaving a ring of zero alpha inside it.\n"
         "\n"
         "Windows: the lighting shader cannot carry alpha at all -- its alpha channel\n"
         "works out to texel.a*(tint.a + 1), never under 1 -- so the glass runs a small\n"
@@ -2191,7 +2504,8 @@ const Scene SCENE = {
         "is the one pane that should not be.\n"
         "\n"
         "Rigid nodes only, since skinning needs bone attributes the harness's shader\n"
-        "does not declare. Twenty-five of them: five body groups plus the differentials\n"
+        "does not declare. Twenty-six of them, one of which is instanced. Five body\n"
+        "groups plus the differentials\n"
         "and the spring and damper top mounts on the chassis matrix; per corner a wheel\n"
         "that spins and travels, an upright that only travels, a coil-and-damper pair\n"
         "scaled about its upper mount so it shortens as the suspension compresses, and a\n"
