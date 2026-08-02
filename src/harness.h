@@ -15,6 +15,9 @@ typedef struct Scene {
     void (*init)(void);
     void (*draw)(void);
     void (*unload)(void);
+    void (*update)(float t);
+    float duration;
+    float animYaw;   // camera yaw --anim holds, in degrees; a mechanism usually reads from one side only
     const Part *parts;
     int partCount;
     Vector3 target;

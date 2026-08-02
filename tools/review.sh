@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Render a model's turntable views into the next renders/<model>/vN/ and ask Codex to critique them.
 # usage: tools/review.sh <model-name> [extra instructions...]
-# env:   FRAMES=4  PART=<part-name>
+# env:   FRAMES=4  PART=<part-name>  ANIM=1
 set -euo pipefail
 
 MODEL="${1:?usage: tools/review.sh <model-name> [extra instructions...]}"
@@ -16,6 +16,7 @@ SRC="models/$MODEL.c"
 
 FRAMES="${FRAMES:-4}"
 PART="${PART:-}"
+ANIM="${ANIM:-}"
 
 BASE="renders/$MODEL"
 mkdir -p "$BASE"
@@ -30,6 +31,15 @@ SUBJECT="the whole model"
 if [ -n "$PART" ]; then
     SHOT_ARGS+=(--part "$PART")
     SUBJECT="the \"$PART\" part in isolation, with the rest of the model hidden"
+fi
+
+FRAMING="taken at evenly spaced camera angles around it"
+if [ -n "$ANIM" ]; then
+    SHOT_ARGS+=(--anim)
+    FRAMING="taken from ONE fixed camera at evenly spaced steps through a single cycle of its motion, so what changes between frames is the pose and not the viewpoint.
+Judge whether the parts stay connected as they move: a joint that separates, a part
+that passes through another, or a travel that runs past its own guide will show up
+in some frames and not others. A defect visible in only one frame is still a defect."
 fi
 "./build/$MODEL" "${SHOT_ARGS[@]}" >/dev/null
 
@@ -67,8 +77,8 @@ read -r -d '' PROMPT <<EOF || true
 You are reviewing a 3D model built procedurally with raylib in C.
 
 Source: $SRC
-Attached: $FRAMES turntable renders of $SUBJECT, taken at evenly spaced camera
-angles around it. The grid squares are 1 world unit.
+Attached: $FRAMES renders of $SUBJECT, $FRAMING
+The grid squares are 1 world unit.
 $( [ -f "$OUT/description.txt" ] && echo "
 What the model is meant to be:
 $(cat "$OUT/description.txt")" )

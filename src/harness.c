@@ -45,6 +45,14 @@ static void SetupLighting(void)
 
 static float OrbitRadius(void) { return (SCENE.orbitRadius > 0.0f) ? SCENE.orbitRadius : 8.0f; }
 
+static float Duration(void) { return (SCENE.duration > 0.0f) ? SCENE.duration : 1.0f; }
+
+// A static scene is the t = 0 pose of an animated one, so every mode poses before it draws and no model needs to care which mode it is in.
+static void PoseAt(float t)
+{
+    if (SCENE.update) SCENE.update(t);
+}
+
 static Color Background(void)
 {
     if (SCENE.background.a == 0) return (Color){ 26, 28, 34, 255 };
@@ -142,7 +150,9 @@ static void WriteDescription(const char *outDir)
     printf("%s\n", path);
 }
 
-static int RunShots(const char *outDir, int frames, int width, int height, int ss)
+// Two ways to spend the frame budget: turn the camera around a fixed pose, or hold the camera and step the pose through one cycle.
+// The second is the only one that shows whether a joint stays connected while it moves, which a turntable of a single pose cannot answer.
+static int RunShots(const char *outDir, int frames, int width, int height, int ss, bool anim)
 {
     MakeDirs(outDir);
     WriteDescription(outDir);
@@ -159,7 +169,12 @@ static int RunShots(const char *outDir, int frames, int width, int height, int s
     SceneFraming(&target, &distance, &pitch);
 
     for (int i = 0; i < frames; i++) {
-        float yaw = 45.0f + 360.0f * (float)i / (float)frames;
+        float yaw = 45.0f;
+        if (anim) {
+            PoseAt(Duration() * (float)i / (float)frames);
+            if (SCENE.animYaw != 0.0f) yaw = SCENE.animYaw;
+        }
+        else yaw += 360.0f * (float)i / (float)frames;
 
         BeginTextureMode(rt);
             ClearBackground(Background());
@@ -215,6 +230,8 @@ static void RunInteractive(void)
         float wheel = GetMouseWheelMove();
         if (wheel != 0.0f) distance = Clamp(distance * (1.0f - wheel * 0.12f), 0.5f, 1000.0f);
 
+        PoseAt(fmodf((float)GetTime(), Duration()));
+
         BeginDrawing();
             ClearBackground(Background());
             DrawWorld(CameraOrbit(target, distance, pitch, yaw));
@@ -230,6 +247,7 @@ static void Usage(const char *argv0)
     printf("usage: %s [--shots DIR] [--frames N] [--size WxH] [--supersample N] [--part NAME]\n", argv0);
     printf("  no args        open an interactive orbit-camera window\n");
     printf("  --shots        render N turntable views to DIR as PNG and exit\n");
+    printf("  --anim         with --shots, hold the camera and step the pose through one cycle instead\n");
     printf("  --part NAME    render only that part, framed to its own bounds\n");
     printf("  --list-parts   print this scene's part names and exit\n");
 }
@@ -246,6 +264,7 @@ int main(int argc, char **argv)
 {
     const char *outDir = NULL;
     const char *partName = NULL;
+    bool anim = false;
     int frames = 4;
     int width = 1024;
     int height = 768;
@@ -253,6 +272,7 @@ int main(int argc, char **argv)
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--shots") == 0 && i + 1 < argc) outDir = argv[++i];
+        else if (strcmp(argv[i], "--anim") == 0) anim = true;
         else if (strcmp(argv[i], "--part") == 0 && i + 1 < argc) partName = argv[++i];
         else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) frames = atoi(argv[++i]);
         else if (strcmp(argv[i], "--supersample") == 0 && i + 1 < argc) ss = atoi(argv[++i]);
@@ -298,9 +318,15 @@ int main(int argc, char **argv)
     SetupLighting();
 
     if (SCENE.init) SCENE.init();
+    PoseAt(0.0f);
+
+    if (anim && !SCENE.update) {
+        TraceLog(LOG_WARNING, "HARNESS: --anim ignored, scene '%s' has no update callback", SCENE.name);
+        anim = false;
+    }
 
     int rc = 0;
-    if (outDir) rc = RunShots(outDir, frames, width, height, ss);
+    if (outDir) rc = RunShots(outDir, frames, width, height, ss, anim);
     else RunInteractive();
 
     if (SCENE.unload) SCENE.unload();
