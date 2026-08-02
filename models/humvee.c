@@ -15,16 +15,16 @@
 #define CAB_REAR_X     -0.90f
 #define AXLE_X          1.65f
 #define AXLE_Y          0.47f
-#define WHEEL_Z         0.89f
-#define ARCH_OUTER      0.56f
+#define WHEEL_Z         0.905f
+#define ARCH_OUTER      0.51f
 #define ARCH_INNER      0.30f
 #define ARCH_TOP        1.02f
 #define WELL_Z          0.60f
 #define BED_RAIL_Y      1.72f
 
 #define WHEEL_SEGS      32
-#define ARCH_SAMPLES    40
-#define MAX_PROFILE     96
+#define ARCH_SAMPLES    64
+#define MAX_PROFILE     160
 #define MAX_REVOLVE     16
 #define SMOOTH_DOT      0.766f
 
@@ -467,7 +467,7 @@ static void BuildGlass(Builder *glass)
 static void BuildRunningGear(Builder *dark, Builder *metal)
 {
     const float tireZ[10] = { -0.155f, -0.155f, -0.140f, -0.110f, -0.085f, 0.085f, 0.110f, 0.140f, 0.155f, 0.155f };
-    const float tireR[10] = {  0.195f,  0.370f,  0.412f,  0.442f,  0.450f, 0.450f, 0.442f, 0.412f, 0.370f, 0.195f };
+    const float tireR[10] = {  0.195f,  0.370f,  0.412f,  0.448f,  0.458f, 0.458f, 0.448f, 0.412f, 0.370f, 0.195f };
     const float rimZ[8] = { -0.185f, -0.185f, -0.158f, -0.158f, 0.158f, 0.158f, 0.185f, 0.185f };
     const float rimR[8] = {  0.000f,  0.060f,  0.075f,  0.215f, 0.215f, 0.075f, 0.060f, 0.000f };
     const float axleZ[2] = { -WHEEL_Z, WHEEL_Z };
@@ -481,7 +481,7 @@ static void BuildRunningGear(Builder *dark, Builder *metal)
             float z = (s == 0) ? -WHEEL_Z : WHEEL_Z;
             PushRevolveZ(dark, (Vector3){ x, AXLE_Y, z }, tireZ, tireR, 10, WHEEL_SEGS);
             PushRevolveZ(metal, (Vector3){ x, AXLE_Y, z }, rimZ, rimR, 8, WHEEL_SEGS);
-            PushTread(dark, (Vector3){ x, AXLE_Y, z }, 16, 0.410f, AXLE_Y, 0.140f, 0.60f);
+            PushTread(dark, (Vector3){ x, AXLE_Y, z }, 16, 0.410f, AXLE_Y, 0.140f, 0.70f);
         }
     }
 }
