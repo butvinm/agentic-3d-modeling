@@ -124,6 +124,17 @@ static void Hex(Builder *b, const Vector3 c[8])
     Quad(b, c[3], c[7], c[4], c[0]);
 }
 
+// Vertical slab spanning x0..x1 and z0..z1 whose floor and ceiling each run from one height at z0 to another at z1.
+static void Prism(Builder *b, float x0, float x1, float z0, float z1,
+                  float yb0, float yb1, float yt0, float yt1)
+{
+    Vector3 c[8] = {
+        { x0, yb0, z0 }, { x1, yb0, z0 }, { x1, yb1, z1 }, { x0, yb1, z1 },
+        { x0, yt0, z0 }, { x1, yt0, z0 }, { x1, yt1, z1 }, { x0, yt1, z1 },
+    };
+    Hex(b, c);
+}
+
 static void Box(Builder *b, float x0, float x1, float y0, float y1, float z0, float z1)
 {
     if (x1 - x0 < 1e-5f || y1 - y0 < 1e-5f || z1 - z0 < 1e-5f) return;
@@ -198,6 +209,7 @@ typedef enum {
     MAT_PANEL, MAT_CONCRETE, MAT_PLINTH, MAT_ROOF,
     MAT_GLASS, MAT_FRAME, MAT_METAL, MAT_TIMBER,
     MAT_GRASS, MAT_ASPHALT,
+    MAT_BARK, MAT_BIRCH, MAT_LEAF, MAT_PAINT, MAT_RUBBER,
     MAT_COUNT
 } MatId;
 
@@ -217,6 +229,13 @@ static const Color MAT_COLOR[MAT_COUNT] = {
     [MAT_TIMBER]   = WHITE,
     [MAT_GRASS]    = WHITE,
     [MAT_ASPHALT]  = WHITE,
+    [MAT_BARK]     = WHITE,
+    [MAT_BIRCH]    = WHITE,
+    [MAT_LEAF]     = WHITE,
+    // The one map authored white on purpose: a car's colour is the per-instance tint, so four
+    // cars are four tints on one mesh rather than four meshes.
+    [MAT_PAINT]    = WHITE,
+    [MAT_RUBBER]   = WHITE,
 };
 
 static const bool MAT_UNLIT[MAT_COUNT] = { 0 };
@@ -357,7 +376,7 @@ static Texture2D MakeRoofTexture(void)
             float u = (float)x / (float)S, v = (float)y / (float)S;
             float grain = (Fbm(u, v, 64, 17u, 2) - 0.5f) * 14.0f;
             float roll = (fmodf(v * 4.0f, 1.0f) < 0.04f) ? -6.0f : 0.0f;
-            px[y * S + x] = Shade((Color){ 74, 72, 70, 255 }, grain + roll);
+            px[y * S + x] = Shade((Color){ 62, 60, 58, 255 }, grain + roll);
         }
     }
     return Upload(img, TEXTURE_WRAP_REPEAT);
@@ -389,7 +408,7 @@ static Texture2D MakeTimberTexture(void)
         for (int x = 0; x < S; x++) {
             float u = (float)x / (float)S, v = (float)y / (float)S;
             float grain = sinf(u * 2.0f * PI * 3.0f + Fbm(u, v, 8, 5u, 2) * 9.0f) * 7.0f;
-            px[y * S + x] = Shade((Color){ 88, 62, 38, 255 }, grain + (Fbm(u, v, 96, 7u, 2) - 0.5f) * 12.0f);
+            px[y * S + x] = Shade((Color){ 68, 54, 38, 255 }, grain + (Fbm(u, v, 96, 7u, 2) - 0.5f) * 12.0f);
         }
     }
     return Upload(img, TEXTURE_WRAP_REPEAT);
@@ -427,6 +446,49 @@ static Texture2D MakeAsphaltTexture(void)
     return Upload(img, TEXTURE_WRAP_REPEAT);
 }
 
+// Bark. A birch is the one tree whose surface is a graphic rather than a texture: pale, with
+// black lenticel dashes across it. Everything else gets vertical furrows.
+static Texture2D MakeBarkTexture(Color base, bool birch)
+{
+    const int S = 256;
+    Image img = NewImage(S);
+    Color *px = (Color *)img.data;
+    for (int y = 0; y < S; y++) {
+        for (int x = 0; x < S; x++) {
+            float u = (float)x / (float)S, v = (float)y / (float)S;
+            float d;
+            if (birch) {
+                float dash = Fbm(u * 3.0f, v * 26.0f, 16, 211u, 2);
+                d = (dash < 0.31f) ? -96.0f : (Fbm(u, v, 48, 19u, 2) - 0.5f) * 14.0f;
+            } else {
+                float furrow = sinf(u * 2.0f * PI * 9.0f + Fbm(u, v, 8, 31u, 3) * 7.0f);
+                d = furrow * 13.0f + (Fbm(u, v, 96, 43u, 2) - 0.5f) * 16.0f;
+            }
+            px[y * S + x] = Shade(base, d);
+        }
+    }
+    return Upload(img, TEXTURE_WRAP_REPEAT);
+}
+
+// Foliage. A crown here is a handful of lumpy blobs rather than leaves, so the map has to carry
+// the leaf-scale break-up the geometry does not: a fine mottle over a coarser one, so a crown
+// reads as a mass of leaves at a distance rather than as a green boulder.
+static Texture2D MakeLeafTexture(void)
+{
+    const int S = 512;
+    Image img = NewImage(S);
+    Color *px = (Color *)img.data;
+    for (int y = 0; y < S; y++) {
+        for (int x = 0; x < S; x++) {
+            float u = (float)x / (float)S, v = (float)y / (float)S;
+            float mass = Fbm(u, v, 6, 67u, 3);
+            Color base = (mass > 0.54f) ? (Color){ 58, 74, 36, 255 } : (Color){ 42, 56, 28, 255 };
+            px[y * S + x] = Shade(base, (Fbm(u, v, 180, 101u, 2) - 0.5f) * 34.0f);
+        }
+    }
+    return Upload(img, TEXTURE_WRAP_REPEAT);
+}
+
 static void MakeTextures(void)
 {
     MAT_TEX[MAT_PANEL]    = MakeRenderTexture((Color){ 118, 112, 100, 255 }, 3u, 20.0f, 12.0f);
@@ -439,6 +501,11 @@ static void MakeTextures(void)
     MAT_TEX[MAT_TIMBER]   = MakeTimberTexture();
     MAT_TEX[MAT_GRASS]    = MakeGrassTexture();
     MAT_TEX[MAT_ASPHALT]  = MakeAsphaltTexture();
+    MAT_TEX[MAT_BARK]     = MakeBarkTexture((Color){ 62, 54, 44, 255 }, false);
+    MAT_TEX[MAT_BIRCH]    = MakeBarkTexture((Color){ 176, 172, 160, 255 }, true);
+    MAT_TEX[MAT_LEAF]     = MakeLeafTexture();
+    MAT_TEX[MAT_PAINT]    = MakeRenderTexture((Color){ 196, 194, 190, 255 }, 137u, 5.0f, 6.0f);
+    MAT_TEX[MAT_RUBBER]   = MakeRenderTexture((Color){ 30, 30, 32, 255 }, 149u, 6.0f, 10.0f);
 }
 
 static void UnloadTextures(void)
@@ -752,6 +819,7 @@ typedef enum {
     FR_SLAB26, FR_SLAB32, FR_ROOF26, FR_ROOF32,
     FR_XWALL, FR_SPINE26, FR_SPINE32,
     FR_BALC, FR_PAR26, FR_PAR32, FR_PAREND, FR_CANOPY, FR_VENT,
+    FR_BIRCH, FR_MAPLE, FR_CARBODY, FR_CARTRIM, FR_BENCH, FR_RUGFRAME, FR_LAMP, FR_BIN,
     FR_COUNT
 } FragType;
 
@@ -759,6 +827,8 @@ typedef struct {
     FragType type;
     Vector3 pos;     // world position of the fragment's local origin, at rest
     float yaw;       // rotation about Y that takes the local frame to the world one, in degrees
+    float scale;     // uniform, so one tree mesh can stand in eight sizes
+    Color tint;      // per-instance, which is how four cars share one body mesh
     float shade;     // per-instance brightness, so 105 copies of one mesh are not 105 identical panels
 } Fragment;
 
@@ -772,23 +842,35 @@ static int gTypeStart[FR_COUNT];
 static int gTypeCount[FR_COUNT];
 static Group gType[FR_COUNT];
 
-static void Emit(FragType t, float x, float y, float z, float yaw)
+static Fragment *Emit(FragType t, float x, float y, float z, float yaw)
 {
     if (gFragCount >= MAX_FRAG) {
         TraceLog(LOG_ERROR, "panelka: more than %d fragments", MAX_FRAG);
-        return;
+        return NULL;
     }
     Fragment *f = &gFrag[gFragCount++];
     f->type = t;
     f->pos = (Vector3){ x, y, z };
     f->yaw = yaw;
+    f->scale = 1.0f;
+    f->tint = WHITE;
     // Hashed off the rest position, so a panel keeps its shade wherever it ends up and two neighbours never draw the same.
     f->shade = Hash2((int)floorf(x * 4.0f), (int)floorf(y * 4.0f + z * 13.0f), 4096, 5u);
+    return f;
+}
+
+// Same, for anything whose instances differ by more than where they are.
+static Fragment *EmitAt(FragType t, float x, float y, float z, float yaw, float scale, Color tint)
+{
+    Fragment *f = Emit(t, x, y, z, yaw);
+    if (f) { f->scale = scale; f->tint = tint; }
+    return f;
 }
 
 static Matrix FragRest(const Fragment *f)
 {
-    return MatrixMultiply(MatrixRotateY(f->yaw * DEG2RAD),
+    return MatrixMultiply(MatrixMultiply(MatrixScale(f->scale, f->scale, f->scale),
+                                         MatrixRotateY(f->yaw * DEG2RAD)),
                           MatrixTranslate(f->pos.x, f->pos.y, f->pos.z));
 }
 
@@ -931,6 +1013,357 @@ static void BuildStructureTypes(void)
         Box(c, -0.450f, 0.450f, 0.0f, 1.150f, -0.300f, 0.300f);
         Box(c, -0.540f, 0.540f, 1.150f, 1.250f, -0.390f, 0.390f);
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// The yard
+//
+// Everything out here is an instanced type too, for the same reason the building is: a tree that
+// the blast is going to lash, a car it is going to rock and bury, and a bench it is going to
+// knock over all need to be things the pose function can move, and none of them is worth a mesh
+// of its own eight times over.
+// ---------------------------------------------------------------------------
+
+// A lumpy ellipsoid. Every crown here is a handful of these rather than leaves.
+//
+// The normal is the underlying ellipsoid's, not the lumpy surface's. That is deliberate: a true
+// normal makes each lump shade as its own object and the crown breaks into a bag of boulders,
+// where the smooth one keeps it reading as one soft mass and leaves the leaf-scale break-up to
+// the map, which is where it can actually be resolved.
+#define BLOB_SEGS 18
+static void Blob(Builder *b, Vector3 c, float rx, float ry, float rz, float lumpy,
+                 unsigned int seed, int rings)
+{
+    Vector3 p0[BLOB_SEGS + 1], n0[BLOB_SEGS + 1], p1[BLOB_SEGS + 1], n1[BLOB_SEGS + 1];
+
+    for (int i = 0; i <= rings; i++) {
+        float phi = PI * (float)i / (float)rings;
+        for (int j = 0; j <= BLOB_SEGS; j++) {
+            float th = 2.0f * PI * (float)j / (float)BLOB_SEGS;
+            Vector3 d = { sinf(phi) * cosf(th), cosf(phi), sinf(phi) * sinf(th) };
+            float k = 1.0f + lumpy * (Fbm((float)j / (float)BLOB_SEGS, phi / PI, 4, seed, 2) - 0.5f) * 2.0f;
+            p1[j] = (Vector3){ c.x + d.x * rx * k, c.y + d.y * ry * k, c.z + d.z * rz * k };
+            n1[j] = Vector3Normalize((Vector3){ d.x / rx, d.y / ry, d.z / rz });
+        }
+        if (i > 0) {
+            for (int j = 0; j < BLOB_SEGS; j++) {
+                // The top and bottom rings collapse to a point, so those bands are fans rather than quads.
+                if (i == 1) { int a = Vert(b, p0[j], n0[j]), c1 = Vert(b, p1[j], n1[j]), d1 = Vert(b, p1[j + 1], n1[j + 1]); Tri(b, a, c1, d1); }
+                else if (i == rings) { int a = Vert(b, p0[j], n0[j]), c1 = Vert(b, p0[j + 1], n0[j + 1]), d1 = Vert(b, p1[j], n1[j]); Tri(b, a, d1, c1); }
+                else QuadN(b, p0[j], p1[j], p1[j + 1], p0[j + 1], n0[j], n1[j], n1[j + 1], n0[j + 1]);
+            }
+        }
+        for (int j = 0; j <= BLOB_SEGS; j++) { p0[j] = p1[j]; n0[j] = n1[j]; }
+    }
+}
+
+// A tree, authored at its nominal height about the point where its trunk meets the ground, so a
+// fragment's scale is the only thing that has to vary between one instance and the next.
+static void BuildTree(Group *g, MatId bark, float height, float trunkR, float crownR,
+                      float crownSquash, int blobs, unsigned int seed)
+{
+    Builder *t = &g->b[bark];
+    float clear = height * 0.46f;    // height of the lowest branch
+    Tube(t, (Vector3){ 0, 0, 0 }, (Vector3){ 0, clear, 0 }, trunkR, trunkR * 0.62f, 10, false, false);
+    Tube(t, (Vector3){ 0, clear, 0 }, (Vector3){ 0, height * 0.86f, 0 }, trunkR * 0.62f, trunkR * 0.18f, 8, false, true);
+
+    // Limbs, spiralled up the trunk rather than dropped at one height, so the crown has something under it from every side.
+    // Their reach is a fraction of crownR rather than most of it: a limb that ends outside the foliage reads as a white stick through a bush, which is what the first build's birches did.
+    const int LIMBS = 5;
+    for (int i = 0; i < LIMBS; i++) {
+        float f = (float)i / (float)(LIMBS - 1);
+        float y = clear + (height * 0.80f - clear) * f;
+        float th = 2.0f * PI * (0.37f * (float)i) + (float)seed * 0.11f;
+        float reach = crownR * (0.52f - 0.22f * f);
+        float r = trunkR * (0.40f - 0.16f * f);
+        Tube(t, (Vector3){ 0, y, 0 },
+             (Vector3){ cosf(th) * reach, y + reach * 0.85f, sinf(th) * reach }, r, r * 0.35f, 7, false, true);
+    }
+
+    // The crown is a cloud of small blobs rather than a handful of big ones. The first build used
+    // seven of up to 0.8 crownR and every tree came out a cabbage: at that size a blob's own
+    // silhouette is the tree's silhouette, so the outline is four or five arcs and nothing about
+    // it reads as foliage. Twenty-two at a third of the radius put the outline where the map's
+    // mottle can carry it.
+    Builder *l = &g->b[MAT_LEAF];
+    float cy = height * 0.76f;
+    float ry = crownR * crownSquash;
+    for (int i = 0; i < blobs; i++) {
+        // Golden-angle spiral over the crown's own ellipsoid, so the blobs cover it evenly
+        // instead of clumping the way a hashed scatter of this few would.
+        float f = ((float)i + 0.5f) / (float)blobs;
+        float th = 2.0f * PI * 0.618034f * (float)i;
+        float cosp = 1.0f - 2.0f * f;
+        float sinp = sqrtf(fmaxf(0.0f, 1.0f - cosp * cosp));
+        float shell = 0.42f + 0.46f * Hash2(i, (int)seed, 128, 7u);
+        float rad = crownR * (0.24f + 0.13f * Hash2(i, (int)seed + 5, 128, 13u));
+        Vector3 c = {
+            sinp * cosf(th) * crownR * shell,
+            cy + cosp * ry * shell * 0.92f,
+            sinp * sinf(th) * crownR * shell,
+        };
+        Blob(l, c, rad, rad * (0.80f + 0.30f * crownSquash), rad, 0.22f, seed + (unsigned int)i * 17u, 6);
+    }
+    // A denser core, so the crown is not a hollow shell wherever two blobs fail to overlap.
+    Blob(l, (Vector3){ 0, cy, 0 }, crownR * 0.56f, ry * 0.60f, crownR * 0.56f, 0.18f, seed + 91u, 8);
+}
+
+// ---------------------------------------------------------------------------
+// A VAZ-2101, from the specification and references/panelka/ref_08.jpg.
+//
+// 4.073 long, 1.611 wide, 1.382 tall, 2.424 wheelbase, 1.349 front track, 0.170 clearance. The
+// elevation sets what the numbers cannot: the beltline runs at 0.83 of the 1.382, and the bonnet
+// crown sits above it rather than below, which is what gives the car its flat-topped nose.
+//
+// Origin on the ground under the centre of the wheelbase, +Z forward, so an instance is a yaw.
+// ---------------------------------------------------------------------------
+
+#define CAR_L      4.073f
+#define CAR_HW     0.806f    // half of 1.611
+#define CAR_H      1.382f
+#define CAR_WB     2.424f
+#define CAR_TRACK  1.349f
+#define CAR_CLR    0.170f
+#define CAR_WR     0.305f    // wheel rolling radius
+#define CAR_WW     0.175f
+#define CAR_BELT   0.830f
+#define CAR_BONNET 0.900f
+#define CAR_NOSE   2.100f
+#define CAR_TAIL   (CAR_NOSE - CAR_L)
+
+static void BuildCar(Group *body, Group *trim)
+{
+    Builder *p = &body->b[MAT_PAINT];
+
+    // Lower body. The outer 0.22 m of each side is swept as vertical strips whose floor follows
+    // the wheel arch, and the band between them keeps a flat floor, so the arch is a recess in
+    // the flank rather than a tunnel straight through the car.
+    //
+    // This is the difference between a car and a box: the track is 1.349 inside a 1.611 body, so
+    // with no arch cut the wheels sit entirely within the body's own width and half their
+    // diameter above its underside. The first build had exactly that and the car read as a crate
+    // with something grey behind it.
+    const float SILL_Y = CAR_CLR + 0.100f;
+    const float ARCH_R = CAR_WR + 0.095f;
+    const float SKIN = 0.220f;
+    for (int band = 0; band < 3; band++) {
+        float bx0, bx1;
+        bool arched = (band != 1);
+        if (band == 0) { bx0 = -CAR_HW; bx1 = -CAR_HW + SKIN; }
+        else if (band == 1) { bx0 = -CAR_HW + SKIN; bx1 = CAR_HW - SKIN; }
+        else { bx0 = CAR_HW - SKIN; bx1 = CAR_HW; }
+
+        const int STRIPS = 96;
+        for (int i = 0; i < STRIPS; i++) {
+            float z0 = CAR_TAIL + (CAR_L * (float)i) / (float)STRIPS;
+            float z1 = CAR_TAIL + (CAR_L * (float)(i + 1)) / (float)STRIPS;
+            float floorY = SILL_Y;
+            if (arched) {
+                float zc = 0.5f * (z0 + z1);
+                for (int a = 0; a < 2; a++) {
+                    float az = (a == 0) ? -CAR_WB * 0.5f : CAR_WB * 0.5f;
+                    float d = fabsf(zc - az);
+                    if (d < ARCH_R) floorY = fmaxf(floorY, CAR_WR + sqrtf(ARCH_R * ARCH_R - d * d));
+                }
+            }
+            // The flanks tuck in below the beltline, which is what the elevation shows and what
+            // stops the section reading as a slab.
+            float tuck = (floorY > SILL_Y + 1e-4f) ? 0.0f : 0.030f;
+            Box(p, bx0 + tuck, bx1 - tuck, floorY, CAR_BELT, z0, z1);
+        }
+    }
+
+    // Bonnet and boot, each a shallow wedge off the beltline. The bonnet crown stands above the
+    // beltline, which is the one thing the elevation settles that the dimension table does not.
+    Prism(p, -CAR_HW + 0.020f, CAR_HW - 0.020f, 0.560f, CAR_NOSE - 0.030f,
+          CAR_BELT, CAR_BELT, CAR_BONNET, CAR_BONNET - 0.055f);
+    Prism(p, -CAR_HW + 0.020f, CAR_HW - 0.020f, CAR_TAIL + 0.030f, -0.620f,
+          CAR_BELT, CAR_BELT, CAR_BONNET - 0.055f, CAR_BONNET - 0.030f);
+
+    // Greenhouse: one tapered hexahedron of glass with the roof panel and the pillars laid over
+    // it. At any distance this scene is ever seen from, a pillar is three pixels and a pane is
+    // twenty, so the glass is the shape and the pillars are the detail.
+    const float GB0 = -1.100f, GB1 = 0.760f;     // beltline ends of the cabin
+    const float GT0 = -0.880f, GT1 = 0.190f;     // roof ends: the windscreen rakes far harder than the backlight
+    const float GBW = CAR_HW - 0.030f, GTW = CAR_HW - 0.130f;
+    const float ROOF_Y0 = CAR_H - 0.055f;
+    {
+        Vector3 c[8] = {
+            { -GBW, CAR_BELT, GB0 }, { GBW, CAR_BELT, GB0 }, { GBW, CAR_BELT, GB1 }, { -GBW, CAR_BELT, GB1 },
+            { -GTW, CAR_H, GT0 }, { GTW, CAR_H, GT0 }, { GTW, CAR_H, GT1 }, { -GTW, CAR_H, GT1 },
+        };
+        Hex(&trim->b[MAT_GLASS], c);
+    }
+    {
+        Vector3 c[8] = {
+            { -GTW - 0.012f, ROOF_Y0, GT0 - 0.012f }, { GTW + 0.012f, ROOF_Y0, GT0 - 0.012f },
+            { GTW + 0.012f, ROOF_Y0, GT1 + 0.012f },  { -GTW - 0.012f, ROOF_Y0, GT1 + 0.012f },
+            { -GTW - 0.012f, CAR_H + 0.012f, GT0 - 0.012f }, { GTW + 0.012f, CAR_H + 0.012f, GT0 - 0.012f },
+            { GTW + 0.012f, CAR_H + 0.012f, GT1 + 0.012f },  { -GTW - 0.012f, CAR_H + 0.012f, GT1 + 0.012f },
+        };
+        Hex(p, c);
+    }
+    // A, B and C pillars, each a wedge running from its beltline foot to its roof head.
+    const float PZ[3][2] = { { GB1, GT1 }, { -0.230f, -0.190f }, { GB0, GT0 } };
+    for (int i = 0; i < 3; i++) {
+        for (int side = 0; side < 2; side++) {
+            float sx = (side == 0) ? 1.0f : -1.0f;
+            float w = (i == 1) ? 0.055f : 0.045f;
+            Vector3 c[8] = {
+                { sx * (GBW - w), CAR_BELT, PZ[i][0] - w }, { sx * GBW, CAR_BELT, PZ[i][0] - w },
+                { sx * GBW, CAR_BELT, PZ[i][0] + w },       { sx * (GBW - w), CAR_BELT, PZ[i][0] + w },
+                { sx * (GTW - w), ROOF_Y0, PZ[i][1] - w },  { sx * GTW, ROOF_Y0, PZ[i][1] - w },
+                { sx * GTW, ROOF_Y0, PZ[i][1] + w },        { sx * (GTW - w), ROOF_Y0, PZ[i][1] + w },
+            };
+            Hex(p, c);
+        }
+    }
+
+    Builder *m = &trim->b[MAT_METAL];
+    // Bumpers, overriders and the grille.
+    Box(m, -CAR_HW + 0.010f, CAR_HW - 0.010f, 0.400f, 0.500f, CAR_NOSE - 0.020f, CAR_NOSE + 0.075f);
+    Box(m, -CAR_HW + 0.010f, CAR_HW - 0.010f, 0.400f, 0.500f, CAR_TAIL - 0.075f, CAR_TAIL + 0.020f);
+    Box(m, -0.620f, 0.620f, 0.560f, 0.760f, CAR_NOSE - 0.040f, CAR_NOSE + 0.010f);
+    // Headlamps and tail lamps.
+    Box(&trim->b[MAT_GLASS], -0.740f, -0.410f, 0.580f, 0.760f, CAR_NOSE - 0.030f, CAR_NOSE + 0.015f);
+    Box(&trim->b[MAT_GLASS], 0.410f, 0.740f, 0.580f, 0.760f, CAR_NOSE - 0.030f, CAR_NOSE + 0.015f);
+    Box(&trim->b[MAT_GLASS], -0.730f, -0.360f, 0.560f, 0.760f, CAR_TAIL - 0.015f, CAR_TAIL + 0.030f);
+    Box(&trim->b[MAT_GLASS], 0.360f, 0.730f, 0.560f, 0.760f, CAR_TAIL - 0.015f, CAR_TAIL + 0.030f);
+    // Wing mirrors, which are most of what breaks a saloon's silhouette from in front.
+    Box(m, -CAR_HW - 0.090f, -CAR_HW + 0.010f, CAR_BELT + 0.020f, CAR_BELT + 0.110f, 0.560f, 0.660f);
+    Box(m, CAR_HW - 0.010f, CAR_HW + 0.090f, CAR_BELT + 0.020f, CAR_BELT + 0.110f, 0.560f, 0.660f);
+
+    Builder *r = &trim->b[MAT_RUBBER];
+    for (int i = 0; i < 4; i++) {
+        float x = ((i & 1) ? 1.0f : -1.0f) * CAR_TRACK * 0.5f;
+        float z = (i & 2) ? CAR_WB * 0.5f : -CAR_WB * 0.5f;
+        Tube(r, (Vector3){ x - CAR_WW * 0.5f, CAR_WR, z }, (Vector3){ x + CAR_WW * 0.5f, CAR_WR, z },
+             CAR_WR, CAR_WR, 16, false, false);
+        // Hub discs, buried 5 mm inside the tyre's outer face rather than flush with it.
+        float hx = x + ((i & 1) ? CAR_WW * 0.5f - 0.005f : -CAR_WW * 0.5f + 0.005f);
+        Tube(m, (Vector3){ hx, CAR_WR, z }, (Vector3){ hx + ((i & 1) ? -0.012f : 0.012f), CAR_WR, z },
+             CAR_WR * 0.60f, CAR_WR * 0.60f, 14, true, true);
+    }
+}
+
+// The yard's furniture, all of it authored about the point where it meets the ground.
+static void BuildYardTypes(void)
+{
+    // Bench: two cast cheeks and five timber slats, which is the pattern every one of these
+    // courtyards has and the only seat that survives thirty winters.
+    {
+        Group *g = &gType[FR_BENCH];
+        Builder *c = &g->b[MAT_CONCRETE];
+        for (int side = 0; side < 2; side++) {
+            float x = (side == 0) ? -0.860f : 0.760f;
+            Box(c, x, x + 0.100f, 0.0f, 0.420f, -0.240f, 0.240f);
+            Box(c, x, x + 0.100f, 0.420f, 0.860f, -0.240f, -0.140f);
+        }
+        Builder *t = &g->b[MAT_TIMBER];
+        for (int i = 0; i < 3; i++) {
+            float z = -0.200f + 0.170f * (float)i;
+            Box(t, -0.900f, 0.900f, 0.420f, 0.465f, z, z + 0.120f);
+        }
+        for (int i = 0; i < 2; i++) {
+            float y = 0.590f + 0.180f * (float)i;
+            Box(t, -0.900f, 0.900f, y, y + 0.130f, -0.235f, -0.190f);
+        }
+    }
+
+    // Rug-beating frame. Two uprights and a top rail, in tube, and the one piece of yard
+    // equipment that says which country this is; ref_07 has three of them in the snow.
+    {
+        Builder *m = &gType[FR_RUGFRAME].b[MAT_METAL];
+        for (int side = 0; side < 2; side++) {
+            float x = (side == 0) ? -1.350f : 1.350f;
+            Tube(m, (Vector3){ x, 0.0f, 0.0f }, (Vector3){ x, 1.900f, 0.0f }, 0.048f, 0.044f, 8, false, false);
+            Tube(m, (Vector3){ x, 1.100f, -0.520f }, (Vector3){ x, 1.900f, 0.0f }, 0.032f, 0.032f, 6, true, false);
+        }
+        Tube(m, (Vector3){ -1.420f, 1.880f, 0.0f }, (Vector3){ 1.420f, 1.880f, 0.0f }, 0.044f, 0.044f, 8, true, true);
+    }
+
+    // Lamp post: a column, a curved bracket faked as two straight runs, and a lantern.
+    {
+        Group *g = &gType[FR_LAMP];
+        Builder *m = &g->b[MAT_METAL];
+        Box(&g->b[MAT_CONCRETE], -0.180f, 0.180f, 0.0f, 0.260f, -0.180f, 0.180f);
+        Tube(m, (Vector3){ 0, 0.180f, 0 }, (Vector3){ 0, 7.400f, 0 }, 0.115f, 0.070f, 10, false, false);
+        Tube(m, (Vector3){ 0, 7.400f, 0 }, (Vector3){ 0, 7.900f, 0.420f }, 0.065f, 0.058f, 8, false, false);
+        Tube(m, (Vector3){ 0, 7.900f, 0.420f }, (Vector3){ 0, 7.980f, 1.180f }, 0.058f, 0.052f, 8, false, false);
+        Box(m, -0.230f, 0.230f, 7.900f, 8.010f, 0.960f, 1.560f);
+        Box(&g->b[MAT_GLASS], -0.205f, 0.205f, 7.820f, 7.905f, 0.985f, 1.535f);
+    }
+
+    // Bin: a drum on a hooped stand.
+    {
+        Group *g = &gType[FR_BIN];
+        Builder *m = &g->b[MAT_METAL];
+        Tube(m, (Vector3){ 0, 0.260f, 0 }, (Vector3){ 0, 0.960f, 0 }, 0.250f, 0.285f, 12, true, false);
+        for (int i = 0; i < 3; i++) {
+            float th = 2.0f * PI * (float)i / 3.0f;
+            Tube(m, (Vector3){ cosf(th) * 0.250f, 0.0f, sinf(th) * 0.250f },
+                 (Vector3){ cosf(th) * 0.190f, 0.320f, sinf(th) * 0.190f }, 0.030f, 0.030f, 6, false, false);
+        }
+    }
+
+    // A birch is tall, narrow and airy; the broadleaf beside it is shorter and much wider. ref_07 has both, and the birches in it stand well clear of a five-storey block's parapet.
+    BuildTree(&gType[FR_BIRCH], MAT_BIRCH, 16.5f, 0.200f, 2.55f, 1.45f, 22, 5u);
+    BuildTree(&gType[FR_MAPLE], MAT_BARK, 11.5f, 0.290f, 3.60f, 0.86f, 24, 23u);
+    BuildCar(&gType[FR_CARBODY], &gType[FR_CARTRIM]);
+}
+
+// Where the yard's things stand. Hand-placed rather than scattered by a hash: a courtyard is
+// laid out, not sprinkled, and the trees that matter are the ones close enough to the facade for
+// the collapse to reach.
+static const Color CAR_PAINT[] = {
+    { 214, 212, 198, 255 },   // the beige every second Zhiguli was
+    { 132, 152, 168, 255 },
+    { 172, 88, 62, 255 },
+    { 208, 200, 168, 255 },
+    { 96, 118, 96, 255 },
+};
+
+static void PlaceYard(void)
+{
+    // Trees. x, z, which species, and the scale that makes each one its own tree.
+    static const float TREES[][4] = {
+        { -34.0f, 9.6f, 0, 0.92f }, { -12.5f, 9.4f, 0, 1.06f }, { 9.0f, 9.8f, 0, 0.86f }, { 31.0f, 9.5f, 0, 1.00f },
+        { -44.0f, 26.5f, 1, 1.05f }, { -25.0f, 27.5f, 0, 1.14f }, { -3.0f, 26.8f, 1, 0.94f },
+        { 17.0f, 27.6f, 0, 1.08f }, { 38.0f, 26.4f, 1, 1.00f },
+        { -46.0f, -24.0f, 1, 0.98f }, { -27.5f, -25.5f, 0, 1.10f }, { -6.0f, -24.5f, 1, 1.16f },
+        { 15.0f, -25.8f, 0, 0.90f }, { 36.0f, -24.2f, 1, 1.04f },
+        { -40.0f, -9.5f, 0, 0.82f }, { 42.0f, -10.5f, 1, 0.88f },
+    };
+    for (int i = 0; i < (int)(sizeof(TREES) / sizeof(TREES[0])); i++) {
+        FragType t = (TREES[i][2] < 0.5f) ? FR_BIRCH : FR_MAPLE;
+        EmitAt(t, TREES[i][0], 0.0f, TREES[i][1], 360.0f * Hash2(i, 3, 64, 29u), TREES[i][3], WHITE);
+    }
+
+    // Cars, nose-in on the parking bay off the drive, and one on the service road behind.
+    static const float CARS[][3] = {
+        { -23.0f, 13.4f, 178.0f }, { -9.6f, 13.4f, 183.0f }, { 4.8f, 13.4f, 176.0f }, { 21.5f, 13.4f, 181.0f },
+        { -34.0f, -17.4f, 92.0f },
+    };
+    for (int i = 0; i < (int)(sizeof(CARS) / sizeof(CARS[0])); i++) {
+        Color c = CAR_PAINT[i % (int)(sizeof(CAR_PAINT) / sizeof(CAR_PAINT[0]))];
+        EmitAt(FR_CARBODY, CARS[i][0], 0.0f, CARS[i][1], CARS[i][2], 1.0f, c);
+        EmitAt(FR_CARTRIM, CARS[i][0], 0.0f, CARS[i][1], CARS[i][2], 1.0f, WHITE);
+    }
+
+    // Two benches flanking each entrance, facing the path.
+    for (int s = 0; s < SECTIONS; s++) {
+        float x = BayX(s, BAY_STAIR);
+        Emit(FR_BENCH, x - 4.20f, 0.0f, -8.60f, 12.0f);
+        Emit(FR_BENCH, x + 4.20f, 0.0f, -8.60f, -12.0f);
+    }
+
+    Emit(FR_RUGFRAME, -21.0f, 0.0f, -12.8f, 8.0f);
+    Emit(FR_RUGFRAME, 12.5f, 0.0f, -13.4f, -6.0f);
+    Emit(FR_BIN, BayX(0, BAY_STAIR) + 2.6f, 0.0f, -9.9f, 0.0f);
+    Emit(FR_BIN, BayX(2, BAY_STAIR) - 2.6f, 0.0f, -9.9f, 0.0f);
+
+    for (int i = 0; i < 4; i++) Emit(FR_LAMP, -36.0f + 24.0f * (float)i, 0.0f, 18.4f, 180.0f);
 }
 
 // ---------------------------------------------------------------------------
@@ -1115,8 +1548,8 @@ static void BuildPlinth(void)
 }
 
 // The site: grass over the whole plot, an asphalt drive and parking bay along the front, and the paths that connect the three entrances to it.
-#define SITE_HX  62.0f
-#define SITE_HZ  46.0f
+#define SITE_HX  240.0f
+#define SITE_HZ  200.0f
 
 static void BuildGround(void)
 {
@@ -1156,7 +1589,8 @@ static void Update(float t)
         gFragMat[i] = FragRest(&gFrag[i]);
         // +-8 either side of white. Enough to separate two neighbouring panels, not enough to read as a repainted one.
         int k = (int)(230.0f + 25.0f * gFrag[i].shade);
-        gFragTint[i] = (Color){ (unsigned char)k, (unsigned char)k, (unsigned char)k, 255 };
+        gFragTint[i] = TintMul((Color){ (unsigned char)k, (unsigned char)k, (unsigned char)k, 255 },
+                               gFrag[i].tint);
     }
 }
 
@@ -1177,9 +1611,12 @@ static Group *PART_ROOF[]   = { &gType[FR_ROOF26], &gType[FR_ROOF32], &gType[FR_
 static Group *PART_BALC[]   = { &gType[FR_BALC] };
 static Group *PART_ENTRY[]  = { &gType[FR_PDOOR], &gType[FR_GDOOR], &gType[FR_CANOPY] };
 static Group *PART_PLINTH[] = { &gPlinth };
+static Group *PART_TREES[]  = { &gType[FR_BIRCH], &gType[FR_MAPLE] };
+static Group *PART_CARS[]   = { &gType[FR_CARBODY], &gType[FR_CARTRIM] };
+static Group *PART_YARD[]   = { &gType[FR_BENCH], &gType[FR_RUGFRAME], &gType[FR_LAMP], &gType[FR_BIN] };
 static Group *PART_GROUND[] = { &gGround };
 
-static BoundingBox bShell, bGlaz, bStruct, bRoof, bBalc, bEntry, bPlinth, bGround;
+static BoundingBox bShell, bGlaz, bStruct, bRoof, bBalc, bEntry, bPlinth, bGround, bTrees, bCars, bYard;
 
 static void DrawAll(void) { DrawGroups(gAll, gAllCount); }
 static void DrawShell(void) { DrawGroups(PART_SHELL, COUNT_OF(PART_SHELL)); }
@@ -1190,6 +1627,9 @@ static void DrawBalc(void) { DrawGroups(PART_BALC, COUNT_OF(PART_BALC)); }
 static void DrawEntry(void) { DrawGroups(PART_ENTRY, COUNT_OF(PART_ENTRY)); }
 static void DrawPlinth(void) { DrawGroups(PART_PLINTH, COUNT_OF(PART_PLINTH)); }
 static void DrawGround(void) { DrawGroups(PART_GROUND, COUNT_OF(PART_GROUND)); }
+static void DrawTrees(void) { DrawGroups(PART_TREES, COUNT_OF(PART_TREES)); }
+static void DrawCars(void) { DrawGroups(PART_CARS, COUNT_OF(PART_CARS)); }
+static void DrawYard(void) { DrawGroups(PART_YARD, COUNT_OF(PART_YARD)); }
 
 static BoundingBox ShellBounds(void) { return bShell; }
 static BoundingBox GlazBounds(void) { return bGlaz; }
@@ -1199,6 +1639,9 @@ static BoundingBox BalcBounds(void) { return bBalc; }
 static BoundingBox EntryBounds(void) { return bEntry; }
 static BoundingBox PlinthBounds(void) { return bPlinth; }
 static BoundingBox GroundBounds(void) { return bGround; }
+static BoundingBox TreeBounds(void) { return bTrees; }
+static BoundingBox CarBounds(void) { return bCars; }
+static BoundingBox YardBounds(void) { return bYard; }
 
 static const Part PARTS[] = {
     { .name = "shell", .draw = DrawShell, .bounds = ShellBounds },
@@ -1209,6 +1652,9 @@ static const Part PARTS[] = {
     { .name = "entrance", .draw = DrawEntry, .bounds = EntryBounds },
     { .name = "plinth", .draw = DrawPlinth, .bounds = PlinthBounds },
     { .name = "ground", .draw = DrawGround, .bounds = GroundBounds },
+    { .name = "trees", .draw = DrawTrees, .bounds = TreeBounds },
+    { .name = "cars", .draw = DrawCars, .bounds = CarBounds },
+    { .name = "yard", .draw = DrawYard, .bounds = YardBounds },
 };
 
 // A group that exists in several hundred places has no single bounding box either. Sample the pose over the cycle and union the eight transformed corners of the local box over every instance, which is the same argument SweepBounds makes for a part that moves: GetModelBoundingBox transforms only the box's own two corners and warns that it does not support rotation (vendor/raylib/src/rmodels.c:1243), which is exactly what a yawed panel is.
@@ -1359,7 +1805,9 @@ static void CheckNothingBuried(void)
     }
     TraceLog(LOG_INFO, "panelka: %d fragments, lowest sits at y = %.3f m (type %d)",
              gFragCount, lowest, worst >= 0 ? (int)gFrag[worst].type : -1);
-    if (lowest < -1e-3f) {
+    // A few millimetres under is a leg seated in the ground rather than balanced on it, which is
+    // the same rule as every other joint here. Anything properly buried is a placement error.
+    if (lowest < -0.050f) {
         TraceLog(LOG_WARNING, "panelka: a fragment reaches %.3f m below grade", -lowest);
     }
 }
@@ -1374,6 +1822,7 @@ static const char *TYPE_NAME[FR_COUNT] = {
     "slab26", "slab32", "roof26", "roof32",
     "xwall", "spine26", "spine32",
     "balc", "par26", "par32", "parend", "canopy", "vent",
+    "birch", "maple", "carbody", "cartrim", "bench", "rugframe", "lamp", "bin",
 };
 
 // The one scene-wide thing this model sets that is normally the harness's business, and it is
@@ -1404,6 +1853,7 @@ static void Init(void)
 
     BuildFacadeTypes();
     BuildStructureTypes();
+    BuildYardTypes();
     for (int t = 0; t < FR_COUNT; t++) {
         GroupFinish(&gType[t], TYPE_NAME[t]);
         GroupRegister(&gType[t]);
@@ -1418,6 +1868,7 @@ static void Init(void)
     GroupRegister(&gGround);
 
     PlaceBuilding();
+    PlaceYard();
     SortFragments();
     Update(0.0f);
 
@@ -1429,6 +1880,9 @@ static void Init(void)
     bEntry = InstBounds(PART_ENTRY, COUNT_OF(PART_ENTRY));
     bPlinth = InstBounds(PART_PLINTH, COUNT_OF(PART_PLINTH));
     bGround = InstBounds(PART_GROUND, COUNT_OF(PART_GROUND));
+    bTrees = InstBounds(PART_TREES, COUNT_OF(PART_TREES));
+    bCars = InstBounds(PART_CARS, COUNT_OF(PART_CARS));
+    bYard = InstBounds(PART_YARD, COUNT_OF(PART_YARD));
 
     CheckBaysTile();
     CheckPanels();
@@ -1475,6 +1929,12 @@ const Scene SCENE = {
         "\n"
         "Behind the skin the structure is real, because the demolition has to break it: floor slabs spanning bay by bay from the facade to the central spine, a spine wall segment per bay, and a cross wall on every bay boundary, which is the load-bearing direction in this series.\n"
         "Windows are opaque, not transparent: the alternative is sixty modelled interiors, and a dark pane with a bright frame is what a window reads as from outside on an overcast day anyway.\n"
+        "\n"
+        "The yard.\n"
+        "Sixteen trees, five cars, six benches, two rug-beating frames, two bins and four lamp posts, all of them instanced types like the building, because a tree the blast is going to lash and a car it is going to bury both have to be things the pose function can move.\n"
+        "A tree crown is twenty-two lumpy ellipsoids on a golden-angle spiral over its own crown ellipsoid, each about a quarter of the crown radius, with the normal taken from the underlying ellipsoid rather than the lumpy surface: a true normal shades every lump as its own object and the crown breaks into a bag of boulders. An earlier build used seven blobs of up to 0.8 of the radius and every tree came out a cabbage, because at that size one blob's silhouette is the whole tree's.\n"
+        "The car is a VAZ-2101 from the specification and ref_08.jpg: 4.073 by 1.611 by 1.382, 2.424 wheelbase, 1.349 front track, 0.170 clearance, with the beltline read off the elevation at 0.83 and the bonnet crown standing above it rather than below, which is what gives the car its flat-topped nose. Its wheel arches are swept as vertical strips whose floor follows the arch circle, in the outer 0.22 m of each flank only, so the arch is a recess rather than a tunnel through the car. Without that cut the 1.349 track sits entirely inside the 1.611 body and the car reads as a crate.\n"
+        "Four cars share one body mesh and differ by the per-instance tint, which is why the body and the trim are separate types: tinting one instance tints all of its materials, and a green car should not have green glass or green tyres.\n"
         "\n"
         "The plinth, the entrance steps and the ground exist once each and are placed groups rather than instanced ones.\n"
         "One thing here is normally the harness's business: a fourth light. The harness lights with three point lights standing at (8,10,8), (-9,5,-7) and (0,-9,5), which surround a 4.5 m vehicle and sit inside a 58 m building, so every outward-facing surface on this one points away from all three and falls back on lighting.fs's ambient term, which line 75 divides by ten -- a 118 texel then leaves the gamma correction at 0.16, which is what turned the gable into a black slab.\n"        "A directional light is the only kind whose geometry does not depend on how big the scene is, so this model fills the shader's one free slot with a sun and leaves the three point lights as the fill, rather than moving them and changing every other model in the repo.\n"
