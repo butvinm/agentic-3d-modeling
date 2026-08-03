@@ -662,8 +662,10 @@ static const float BAY_W[BAYS] = { 2.6f, 3.2f, 2.6f, 2.6f, 2.6f, 3.2f, 2.6f };
 #define SECTION_LEN   19.4f
 #define BLOCK_LEN     (SECTIONS * SECTION_LEN)
 
-#define STOREY        2.700f
-#define SLAB_T        0.220f   // structural slab plus screed
+// 2.50 m of clear ceiling and a 0.10 m slab are both specified; the 0.06 m screed over the slab is not, and is the only invented part of the storey.
+#define STOREY        2.660f
+#define SLAB_T        0.160f   // 0.10 structural plus 0.06 of screed, drawn as two layers
+#define SLAB_STRUCT   0.100f
 #define SLAB_BEAR     0.100f   // how far a slab's end is built into the facade panel it lands on
 #define PLINTH_Y      0.750f   // ground-floor level above grade
 #define WALL_T        0.300f   // outer panel: the series specifies 0.21 to 0.35 by climate zone
@@ -684,8 +686,11 @@ static const float BAY_W[BAYS] = { 2.6f, 3.2f, 2.6f, 2.6f, 2.6f, 3.2f, 2.6f };
 #define CORE_T        (WALL_T - FACE_T)
 
 #define ROOF_Y        (PLINTH_Y + FLOORS * STOREY)      // 14.25, top of the fifth-floor ceiling
-#define PARAPET_H     0.450f
-#define PARAPET_T     0.200f
+// Flat, which is the series' own specification and what ref_03 and ref_05 show; the pitched metal roofs in ref_02 and ref_07 are the re-roofing thousands of these got in the 1990s, not the building.
+// What those two do show is a thin cornice with a metal capping that oversails it, not the 0.45 m parapet this model first had.
+#define PARAPET_H     0.320f
+#define PARAPET_T     0.180f
+#define CORNICE_O     0.110f   // how far the capping oversails the facade below it
 
 // Openings. Sills are measured up from the floor the panel stands on.
 #define WIN_SILL      0.850f
@@ -695,9 +700,12 @@ static const float BAY_W[BAYS] = { 2.6f, 3.2f, 2.6f, 2.6f, 2.6f, 3.2f, 2.6f };
 #define BDOOR_W       0.750f
 #define BDOOR_SILL    0.100f
 #define BDOOR_H       2.100f
-#define STAIR_W       0.950f
-#define STAIR_SILL    1.000f
-#define STAIR_H       1.300f
+// A stairwell landing is half a flight above the floor its panel stands on, so its window cannot share the apartments' rhythm.
+// One-storey panels cannot carry a light that straddles the slab, so consecutive storeys alternate between a low sill and a high one, which is the zigzag the real rhythm reads as from outside.
+#define STAIR_W       1.150f
+#define STAIR_SILL_LO 0.450f
+#define STAIR_SILL_HI 1.300f
+#define STAIR_H       1.100f
 #define ENTRY_W       1.400f
 #define ENTRY_H       2.150f
 
@@ -814,11 +822,11 @@ static void Sill(Group *g, Rect r)
 // ---------------------------------------------------------------------------
 
 typedef enum {
-    FR_P26, FR_P32, FR_P32B, FR_PSTAIR, FR_PDOOR, FR_PEND,
-    FR_G26, FR_G32, FR_G32B, FR_GSTAIR, FR_GDOOR,
+    FR_P26, FR_P32, FR_P32B, FR_PSTAIR, FR_PSTAIR2, FR_PDOOR, FR_PEND,
+    FR_G26, FR_G32, FR_G32B, FR_GSTAIR, FR_GSTAIR2, FR_GDOOR,
     FR_SLAB26, FR_SLAB32, FR_ROOF26, FR_ROOF32,
     FR_XWALL, FR_SPINE26, FR_SPINE32,
-    FR_BALC, FR_PAR26, FR_PAR32, FR_PAREND, FR_CANOPY, FR_VENT,
+    FR_BALC, FR_BALCG, FR_PAR26, FR_PAR32, FR_PAREND, FR_CANOPY, FR_VENT, FR_PIPE, FR_MAST,
     FR_BIRCH, FR_MAPLE, FR_CARBODY, FR_CARTRIM, FR_BENCH, FR_RUGFRAME, FR_LAMP, FR_BIN,
     FR_COUNT
 } FragType;
@@ -907,9 +915,12 @@ static void BuildFacadeTypes(void)
     Glazing(&gType[FR_G32B], bal[1], true);
 
     // The stairwell: one tall narrow light per storey, its sill well above an apartment's because the landing it serves is half a flight up. The real thing staggers a window per half-flight; this is one per storey, which is as far as a one-storey panel can go.
-    Rect st = { -STAIR_W * 0.5f, STAIR_W * 0.5f, STAIR_SILL, STAIR_SILL + STAIR_H };
-    FacadePanel(&gType[FR_PSTAIR], 2.6f, STOREY, &st, 1);
-    Glazing(&gType[FR_GSTAIR], st, false);
+    Rect stLo = { -STAIR_W * 0.5f, STAIR_W * 0.5f, STAIR_SILL_LO, STAIR_SILL_LO + STAIR_H };
+    Rect stHi = { -STAIR_W * 0.5f, STAIR_W * 0.5f, STAIR_SILL_HI, STAIR_SILL_HI + STAIR_H };
+    FacadePanel(&gType[FR_PSTAIR], 2.6f, STOREY, &stLo, 1);
+    Glazing(&gType[FR_GSTAIR], stLo, false);
+    FacadePanel(&gType[FR_PSTAIR2], 2.6f, STOREY, &stHi, 1);
+    Glazing(&gType[FR_GSTAIR2], stHi, false);
 
     // The entrance: a doorway to the floor, with a fanlight over it.
     Rect en = { -ENTRY_W * 0.5f, ENTRY_W * 0.5f, 0.0f, ENTRY_H };
@@ -943,8 +954,8 @@ static void BuildFacadeTypes(void)
 static void BuildSlab(Group *g, float w, MatId top)
 {
     float z0 = -(INNER_Z + SLAB_BEAR), z1 = KNIT;
-    Box(&g->b[MAT_CONCRETE], -w * 0.5f - KNIT, w * 0.5f + KNIT, 0.0f, SLAB_T - 0.030f, z0, z1);
-    Box(&g->b[top], -w * 0.5f - KNIT, w * 0.5f + KNIT, SLAB_T - 0.030f, SLAB_T, z0, z1);
+    Box(&g->b[MAT_CONCRETE], -w * 0.5f - KNIT, w * 0.5f + KNIT, 0.0f, SLAB_STRUCT, z0, z1);
+    Box(&g->b[top], -w * 0.5f - KNIT, w * 0.5f + KNIT, SLAB_STRUCT, SLAB_T, z0, z1);
 }
 
 static void BuildStructureTypes(void)
@@ -965,53 +976,95 @@ static void BuildStructureTypes(void)
 
     // Parapet segments, authored about the centre of the bay they cap, at roof level.
     Box(&gType[FR_PAR26].b[MAT_CONCRETE], -1.3f - KNIT, 1.3f + KNIT, -KNIT, PARAPET_H, -PARAPET_T, 0.0f);
+    Box(&gType[FR_PAR26].b[MAT_METAL], -1.3f - CORNICE_O, 1.3f + CORNICE_O, PARAPET_H, PARAPET_H + 0.055f, -PARAPET_T - 0.030f, CORNICE_O);
     Box(&gType[FR_PAR32].b[MAT_CONCRETE], -1.6f - KNIT, 1.6f + KNIT, -KNIT, PARAPET_H, -PARAPET_T, 0.0f);
+    Box(&gType[FR_PAR32].b[MAT_METAL], -1.6f - CORNICE_O, 1.6f + CORNICE_O, PARAPET_H, PARAPET_H + 0.055f, -PARAPET_T - 0.030f, CORNICE_O);
     Box(&gType[FR_PAREND].b[MAT_CONCRETE], -FACE_Z * 0.5f - KNIT, FACE_Z * 0.5f + KNIT, -KNIT, PARAPET_H, -PARAPET_T, 0.0f);
+    Box(&gType[FR_PAREND].b[MAT_METAL], -FACE_Z * 0.5f - CORNICE_O, FACE_Z * 0.5f + CORNICE_O, PARAPET_H, PARAPET_H + 0.055f, -PARAPET_T - 0.030f, CORNICE_O);
 
-    // A balcony: a slab cantilevered past the facade, a kerb round its edge, and a railing of uprights between two rails. Authored about the facade's outer face at floor level, so it hangs off the panel rather than off a copy of the panel's coordinates.
-    {
-        Group *g = &gType[FR_BALC];
+    // A balcony. Authored about the facade's outer face at floor level, so it hangs off the panel rather than off a copy of the panel's coordinates.
+    //
+    // The front is a solid sheet, not a railing. The first build had 13 uprights and a top rail, and Codex read the whole facade as an access gallery: ref_03 and ref_05 both show boxy masses with opaque sheet fronts in whatever colour the resident had, and a great many enclosed behind glazing entirely. So there are two types, and four in ten of them are glazed in.
+    for (int glazed = 0; glazed < 2; glazed++) {
+        Group *g = &gType[glazed ? FR_BALCG : FR_BALC];
         Builder *c = &g->b[MAT_CONCRETE];
         float hw = BALC_W * 0.5f;
         // The slab's root runs 0.20 back into the facade, which is where it is cast in.
         Box(c, -hw, hw, -BALC_T, 0.0f, -0.200f, BALC_D);
-        Box(c, -hw, -hw + 0.080f, 0.0f, 0.120f, 0.0f, BALC_D);
-        Box(c, hw - 0.080f, hw, 0.0f, 0.120f, 0.0f, BALC_D);
-        Box(c, -hw, hw, 0.0f, 0.120f, BALC_D - 0.080f, BALC_D);
 
         Builder *m = &g->b[MAT_METAL];
         float rt = BALC_RAIL_H;
-        Box(m, -hw, hw, rt - 0.050f, rt, 0.0f, 0.050f);
-        Box(m, -hw, hw, rt - 0.050f, rt, BALC_D - 0.050f, BALC_D);
-        Box(m, -hw, -hw + 0.050f, rt - 0.050f, rt, 0.0f, BALC_D);
-        Box(m, hw - 0.050f, hw, rt - 0.050f, rt, 0.0f, BALC_D);
-        for (int i = 0; i <= 12; i++) {
-            float x = -hw + BALC_W * (float)i / 12.0f;
-            Box(m, x - 0.014f, x + 0.014f, 0.120f, rt - 0.050f, BALC_D - 0.040f, BALC_D - 0.012f);
+        // Sheet front and returns, standing off the slab edge, with a capping rail over them.
+        Box(m, -hw, hw, 0.0f, rt - 0.045f, BALC_D - 0.055f, BALC_D);
+        Box(m, -hw, -hw + 0.055f, 0.0f, rt - 0.045f, 0.0f, BALC_D);
+        Box(m, hw - 0.055f, hw, 0.0f, rt - 0.045f, 0.0f, BALC_D);
+        Box(m, -hw - 0.020f, hw + 0.020f, rt - 0.045f, rt, BALC_D - 0.075f, BALC_D + 0.020f);
+        Box(m, -hw - 0.020f, -hw + 0.075f, rt - 0.045f, rt, 0.0f, BALC_D + 0.020f);
+        Box(m, hw - 0.075f, hw + 0.020f, rt - 0.045f, rt, 0.0f, BALC_D + 0.020f);
+
+        if (glazed) {
+            // Glazed in up to the underside of the balcony above, in frames and panes, which is
+            // what perhaps half of these carry by now.
+            float top = STOREY - BALC_T - 0.030f;
+            Builder *f = &g->b[MAT_FRAME];
+            Box(f, -hw, hw, rt, top, BALC_D - 0.070f, BALC_D - 0.010f);
+            Box(f, -hw, -hw + 0.060f, rt, top, 0.0f, BALC_D);
+            Box(f, hw - 0.060f, hw, rt, top, 0.0f, BALC_D);
+            Box(f, -hw, hw, top - 0.055f, top, 0.0f, BALC_D);
+            for (int i = 1; i < 4; i++) {
+                float x = -hw + BALC_W * (float)i / 4.0f;
+                Box(f, x - 0.030f, x + 0.030f, rt, top, BALC_D - 0.070f, BALC_D - 0.010f);
+            }
+            Box(&g->b[MAT_GLASS], -hw + 0.055f, hw - 0.055f, rt + 0.030f, top - 0.055f,
+                BALC_D - 0.055f, BALC_D - 0.030f);
+            Box(&g->b[MAT_GLASS], -hw + 0.055f, -hw + 0.070f, rt + 0.030f, top - 0.055f, 0.030f, BALC_D - 0.060f);
+            Box(&g->b[MAT_GLASS], hw - 0.070f, hw - 0.055f, rt + 0.030f, top - 0.055f, 0.030f, BALC_D - 0.060f);
         }
-        for (int i = 0; i <= 4; i++) {
-            float z = BALC_D * (float)i / 4.0f;
-            Box(m, -hw + 0.012f, -hw + 0.040f, 0.120f, rt - 0.050f, z - 0.014f, z + 0.014f);
-            Box(m, hw - 0.040f, hw - 0.012f, 0.120f, rt - 0.050f, z - 0.014f, z + 0.014f);
-        }
-        // Corrugated infill sheeting below the rail, which is what these are actually filled with once a resident has been at them.
-        Box(&g->b[MAT_METAL], -hw + 0.050f, hw - 0.050f, 0.120f, rt - 0.070f,
-            BALC_D - 0.032f, BALC_D - 0.020f);
     }
 
     // The entrance canopy: a slab on two brackets over the door.
     {
         Builder *c = &gType[FR_CANOPY].b[MAT_CONCRETE];
-        Box(c, -1.200f, 1.200f, 0.0f, 0.140f, 0.0f, 1.300f);
-        Box(c, -1.200f, -1.060f, -0.500f, 0.0f, 0.0f, 0.260f);
-        Box(c, 1.060f, 1.200f, -0.500f, 0.0f, 0.0f, 0.260f);
+        Box(c, -0.980f, 0.980f, 0.0f, 0.100f, 0.0f, 1.050f);
+        Box(c, -0.980f, -0.870f, -0.380f, 0.0f, 0.0f, 0.210f);
+        Box(c, 0.870f, 0.980f, -0.380f, 0.0f, 0.0f, 0.210f);
     }
 
-    // A roof ventilation stack, brick with a concrete cap.
+    // A roof ventilation stack: a broad multi-flue body under a capping slab, which is what
+    // ref_02 and ref_03 show. The first build's 0.9 by 0.6 posts read as bollards.
     {
         Builder *c = &gType[FR_VENT].b[MAT_CONCRETE];
-        Box(c, -0.450f, 0.450f, 0.0f, 1.150f, -0.300f, 0.300f);
-        Box(c, -0.540f, 0.540f, 1.150f, 1.250f, -0.390f, 0.390f);
+        Box(c, -1.150f, 1.150f, 0.0f, 1.500f, -0.420f, 0.420f);
+        for (int i = 0; i < 4; i++) {
+            float x = -0.840f + 0.560f * (float)i;
+            Box(c, x - 0.190f, x + 0.190f, 1.500f, 1.860f, -0.300f, 0.300f);
+        }
+        Box(c, -1.270f, 1.270f, 1.860f, 1.960f, -0.540f, 0.540f);
+    }
+
+    // Downpipes, which ref_03 and ref_05 both make one of the loudest things on the facade and
+    // which the first build had none of. One segment per storey, so they break up with the
+    // building rather than falling as a 13 m stick.
+    {
+        Builder *m = &gType[FR_PIPE].b[MAT_METAL];
+        Tube(m, (Vector3){ 0, -KNIT, 0 }, (Vector3){ 0, STOREY + KNIT, 0 }, 0.058f, 0.058f, 8, false, false);
+        Box(m, -0.080f, 0.080f, 0.180f, 0.260f, -0.100f, 0.010f);
+    }
+
+    // The mast every one of these roofs grew in the 1970s.
+    {
+        Builder *m = &gType[FR_MAST].b[MAT_METAL];
+        Tube(m, (Vector3){ 0, 0, 0 }, (Vector3){ 0, 4.200f, 0 }, 0.055f, 0.032f, 8, false, true);
+        for (int i = 0; i < 5; i++) {
+            float y = 2.100f + 0.420f * (float)i;
+            float r = 0.760f - 0.100f * (float)i;
+            Tube(m, (Vector3){ -r, y, 0 }, (Vector3){ r, y, 0 }, 0.020f, 0.020f, 5, true, true);
+        }
+        for (int i = 0; i < 3; i++) {
+            float th = 2.0f * PI * (float)i / 3.0f;
+            Tube(m, (Vector3){ 0, 1.900f, 0 },
+                 (Vector3){ cosf(th) * 1.400f, 0.0f, sinf(th) * 1.400f }, 0.014f, 0.014f, 4, false, false);
+        }
     }
 }
 
@@ -1075,8 +1128,9 @@ static void BuildTree(Group *g, MatId bark, float height, float trunkR, float cr
         float f = (float)i / (float)(LIMBS - 1);
         float y = clear + (height * 0.80f - clear) * f;
         float th = 2.0f * PI * (0.37f * (float)i) + (float)seed * 0.11f;
-        float reach = crownR * (0.52f - 0.22f * f);
-        float r = trunkR * (0.40f - 0.16f * f);
+        // Far enough out to be seen under the crown, not so far as to end outside it: Codex read the first pass as balloons on poles because nothing bridged trunk and foliage.
+        float reach = crownR * (0.78f - 0.26f * f);
+        float r = trunkR * (0.52f - 0.20f * f);
         Tube(t, (Vector3){ 0, y, 0 },
              (Vector3){ cosf(th) * reach, y + reach * 0.85f, sinf(th) * reach }, r, r * 0.35f, 7, false, true);
     }
@@ -1097,7 +1151,7 @@ static void BuildTree(Group *g, MatId bark, float height, float trunkR, float cr
         float cosp = 1.0f - 2.0f * f;
         float sinp = sqrtf(fmaxf(0.0f, 1.0f - cosp * cosp));
         float shell = 0.42f + 0.46f * Hash2(i, (int)seed, 128, 7u);
-        float rad = crownR * (0.24f + 0.13f * Hash2(i, (int)seed + 5, 128, 13u));
+        float rad = crownR * (0.17f + 0.26f * Hash2(i, (int)seed + 5, 128, 13u));
         Vector3 c = {
             sinp * cosf(th) * crownR * shell,
             cy + cosp * ry * shell * 0.92f,
@@ -1375,8 +1429,10 @@ static void PlaceYard(void)
 static FragType PanelAt(int bay, int floor, bool front, FragType *glazing)
 {
     if (bay == BAY_STAIR) {
-        if (front) { *glazing = FR_GSTAIR; return FR_PSTAIR; }
-        if (floor == 0) { *glazing = FR_GDOOR; return FR_PDOOR; }
+        if (!front && floor == 0) { *glazing = FR_GDOOR; return FR_PDOOR; }
+        // A landing sits half a flight above the floor its panel stands on, so the lights zigzag
+        // rather than stacking on the apartments' rhythm.
+        if (floor & 1) { *glazing = FR_GSTAIR2; return FR_PSTAIR2; }
         *glazing = FR_GSTAIR;
         return FR_PSTAIR;
     }
@@ -1413,8 +1469,11 @@ static void PlaceBuilding(void)
 
                 // Balconies, on the two wide bays of every section and every floor, both facades. ref_07 shows them running to the ground floor rather than starting at the first, which is what this follows.
                 if (b == BAY_BALC_A || b == BAY_BALC_B) {
-                    Emit(FR_BALC, x, y, FACE_Z, 0.0f);
-                    Emit(FR_BALC, x, y, -FACE_Z, 180.0f);
+                    for (int side = 0; side < 2; side++) {
+                        float bz = (side == 0) ? FACE_Z : -FACE_Z;
+                        bool glazed = Hash2(s * 13 + b, f * 7 + side, 512, 313u) < 0.40f;
+                        Emit(glazed ? FR_BALCG : FR_BALC, x, y, bz, (side == 0) ? 0.0f : 180.0f);
+                    }
                 }
             }
 
@@ -1439,6 +1498,16 @@ static void PlaceBuilding(void)
                 Emit(FR_PEND, ex, y, -FACE_Z * 0.5f, yaw);
             }
 
+            // Downpipes, at each section joint and each gable corner, on both facades. A pipe
+            // stands just clear of the panel face so it reads as bolted on rather than cast in.
+            for (int e = 0; e <= SECTIONS; e++) {
+                float px = -BLOCK_LEN * 0.5f + SECTION_LEN * (float)e;
+                if (e == 0) px += 0.360f;
+                if (e == SECTIONS) px -= 0.360f;
+                Emit(FR_PIPE, px, y, FACE_Z + 0.070f, 0.0f);
+                Emit(FR_PIPE, px, y, -FACE_Z - 0.070f, 180.0f);
+            }
+
             // The entrance canopy hangs over the back door, one storey up.
             if (f == 0) {
                 Emit(FR_CANOPY, BayX(s, BAY_STAIR), PLINTH_Y + ENTRY_H + 0.350f, -FACE_Z, 180.0f);
@@ -1454,8 +1523,9 @@ static void PlaceBuilding(void)
             Emit((BAY_W[b] > 2.9f) ? FR_PAR32 : FR_PAR26, x, ROOF_Y, FACE_Z, 0.0f);
             Emit((BAY_W[b] > 2.9f) ? FR_PAR32 : FR_PAR26, x, ROOF_Y, -FACE_Z, 180.0f);
         }
-        Emit(FR_VENT, BayX(s, BAY_STAIR) - 1.9f, ROOF_Y, 2.4f, 0.0f);
-        Emit(FR_VENT, BayX(s, BAY_STAIR) + 1.9f, ROOF_Y, -2.4f, 0.0f);
+        Emit(FR_VENT, BayX(s, BAY_STAIR) - 2.6f, ROOF_Y, 2.4f, 0.0f);
+        Emit(FR_VENT, BayX(s, BAY_STAIR) + 2.6f, ROOF_Y, -2.4f, 0.0f);
+        Emit(FR_MAST, BayX(s, BAY_BALC_A) + 1.2f, ROOF_Y, -1.6f, 0.0f);
     }
 
     // Parapet across the two ends.
@@ -1538,13 +1608,36 @@ static void BuildPlinth(void)
         }
         // Landing in front of the door.
         Box(&g->b[MAT_CONCRETE], x - 1.100f, x + 1.100f, 0.0f, PLINTH_Y, -hz - t, -hz + 0.200f);
-        // Cheek walls either side of the flight.
+        // A kerb either side of the flight with a handrail over it, rather than the two full-height walls this had first: ref_05 and ref_07 both show a modest step up, not a walled ramp.
         for (int side = 0; side < 2; side++) {
             float cx = (side == 0) ? x - 1.240f : x + 1.100f;
-            Box(&g->b[MAT_CONCRETE], cx, cx + 0.140f, 0.0f, PLINTH_Y + 0.120f,
+            Box(&g->b[MAT_CONCRETE], cx, cx + 0.140f, 0.0f, 0.240f,
                 -hz - t - tread * (float)RISERS, -hz);
+            float rx = cx + 0.070f;
+            Tube(&g->b[MAT_METAL], (Vector3){ rx, 0.240f, -hz - t - tread * (float)RISERS + 0.10f },
+                 (Vector3){ rx, PLINTH_Y + 0.640f, -hz - t - tread * 0.5f }, 0.026f, 0.026f, 7, true, true);
+            Tube(&g->b[MAT_METAL], (Vector3){ rx, PLINTH_Y + 0.640f, -hz - t - tread * 0.5f },
+                 (Vector3){ rx, PLINTH_Y + 0.900f, -hz + 0.10f }, 0.026f, 0.026f, 7, false, true);
         }
     }
+}
+
+// A horizontal slab of paving whose corners are cut off. Emitted as a top face only: it lies
+// 40 mm over the grass and nothing in this scene is ever under it.
+//
+// It exists because Codex read the first site as a diagram: every path ended in a hard rectangle
+// and met the grass at a right angle, where ref_03 and ref_05 show worn, splayed junctions.
+static void Pad(Builder *b, float x0, float x1, float z0, float z1, float ch, float y)
+{
+    const Vector3 n = { 0, 1, 0 };
+    Vector3 v[8] = {
+        { x0 + ch, y, z0 }, { x1 - ch, y, z0 }, { x1, y, z0 + ch }, { x1, y, z1 - ch },
+        { x1 - ch, y, z1 }, { x0 + ch, y, z1 }, { x0, y, z1 - ch }, { x0, y, z0 + ch },
+    };
+    int c = Vert(b, (Vector3){ (x0 + x1) * 0.5f, y, (z0 + z1) * 0.5f }, n);
+    int idx[8];
+    for (int i = 0; i < 8; i++) idx[i] = Vert(b, v[i], n);
+    for (int i = 0; i < 8; i++) Tri(b, c, idx[i], idx[(i + 1) % 8]);
 }
 
 // The site: grass over the whole plot, an asphalt drive and parking bay along the front, and the paths that connect the three entrances to it.
@@ -1558,16 +1651,22 @@ static void BuildGround(void)
     // Grass sits fractionally below zero, so the asphalt laid on top of it wins the depth test everywhere it covers rather than fighting it.
     Box(&g->b[MAT_GRASS], -SITE_HX, SITE_HX, -0.120f, -0.010f, -SITE_HZ, SITE_HZ);
 
-    // The drive along the main facade, and the parking bay off it.
-    Box(&g->b[MAT_ASPHALT], -SITE_HX, SITE_HX, -0.010f, 0.030f, 16.0f, 22.5f);
-    Box(&g->b[MAT_ASPHALT], -26.0f, 14.0f, -0.010f, 0.030f, 11.5f, 16.0f);
+    Builder *a = &g->b[MAT_ASPHALT];
 
-    // The service road behind, and a landing outside each entrance.
-    Box(&g->b[MAT_ASPHALT], -SITE_HX, SITE_HX, -0.010f, 0.030f, -20.0f, -15.0f);
+    // The drive along the main facade, and the parking bay off it.
+    Box(a, -SITE_HX, SITE_HX, -0.010f, 0.030f, 16.0f, 22.5f);
+    Pad(a, -26.0f, 14.0f, 11.5f, 16.1f, 2.2f, 0.030f);
+
+    // The service road behind, a splayed pad outside each entrance, and the path that runs from
+    // it to the door.
+    Box(a, -SITE_HX, SITE_HX, -0.010f, 0.030f, -20.0f, -15.0f);
     for (int s = 0; s < SECTIONS; s++) {
         float x = BayX(s, BAY_STAIR);
-        Box(&g->b[MAT_ASPHALT], x - 2.6f, x + 2.6f, -0.010f, 0.030f, -15.0f, -FACE_Z - 2.4f);
+        Pad(a, x - 1.7f, x + 1.7f, -14.9f, -FACE_Z - 2.3f, 1.1f, 0.030f);
+        Pad(a, x - 4.6f, x + 4.6f, -FACE_Z - 3.3f, -FACE_Z - 1.4f, 1.4f, 0.030f);
     }
+    // A worn footpath along the back, which is where everyone actually walks.
+    Pad(a, -BLOCK_LEN * 0.5f - 6.0f, BLOCK_LEN * 0.5f + 6.0f, -11.4f, -9.6f, 1.6f, 0.028f);
 
     // Kerbs along the drive.
     for (int i = 0; i < 2; i++) {
@@ -1601,14 +1700,14 @@ static void Update(float t)
 #define COUNT_OF(a) ((int)(sizeof(a) / sizeof((a)[0])))
 
 static Group *PART_SHELL[]  = { &gType[FR_P26], &gType[FR_P32], &gType[FR_P32B],
-                                &gType[FR_PSTAIR], &gType[FR_PDOOR], &gType[FR_PEND] };
+                                &gType[FR_PSTAIR], &gType[FR_PDOOR], &gType[FR_PEND], &gType[FR_PIPE] };
 static Group *PART_GLAZ[]   = { &gType[FR_G26], &gType[FR_G32], &gType[FR_G32B],
                                 &gType[FR_GSTAIR], &gType[FR_GDOOR] };
 static Group *PART_STRUCT[] = { &gType[FR_SLAB26], &gType[FR_SLAB32],
                                 &gType[FR_XWALL], &gType[FR_SPINE26], &gType[FR_SPINE32] };
 static Group *PART_ROOF[]   = { &gType[FR_ROOF26], &gType[FR_ROOF32], &gType[FR_PAR26],
-                                &gType[FR_PAR32], &gType[FR_PAREND], &gType[FR_VENT] };
-static Group *PART_BALC[]   = { &gType[FR_BALC] };
+                                &gType[FR_PAR32], &gType[FR_PAREND], &gType[FR_VENT], &gType[FR_MAST] };
+static Group *PART_BALC[]   = { &gType[FR_BALC], &gType[FR_BALCG] };
 static Group *PART_ENTRY[]  = { &gType[FR_PDOOR], &gType[FR_GDOOR], &gType[FR_CANOPY] };
 static Group *PART_PLINTH[] = { &gPlinth };
 static Group *PART_TREES[]  = { &gType[FR_BIRCH], &gType[FR_MAPLE] };
@@ -1732,8 +1831,10 @@ static void CheckPanels(void)
         { 0.100f, 0.100f + 1.200f, WIN_SILL, WIN_SILL + WIN_H },
     };
     CheckOpenings("balcony panel", 3.2f, STOREY, bal, 2);
-    Rect st = { -STAIR_W * 0.5f, STAIR_W * 0.5f, STAIR_SILL, STAIR_SILL + STAIR_H };
-    CheckOpenings("stairwell panel", 2.6f, STOREY, &st, 1);
+    Rect stLo = { -STAIR_W * 0.5f, STAIR_W * 0.5f, STAIR_SILL_LO, STAIR_SILL_LO + STAIR_H };
+    CheckOpenings("stairwell panel, low sill", 2.6f, STOREY, &stLo, 1);
+    Rect stHi = { -STAIR_W * 0.5f, STAIR_W * 0.5f, STAIR_SILL_HI, STAIR_SILL_HI + STAIR_H };
+    CheckOpenings("stairwell panel, high sill", 2.6f, STOREY, &stHi, 1);
     Rect en = { -ENTRY_W * 0.5f, ENTRY_W * 0.5f, 0.0f, ENTRY_H };
     CheckOpenings("entrance panel", 2.6f, STOREY, &en, 1);
 }
@@ -1744,7 +1845,7 @@ static void CheckHeadroom(void)
     float ceiling = STOREY - SLAB_T;
     float win = ceiling - (WIN_SILL + WIN_H);
     float door = ceiling - (BDOOR_SILL + BDOOR_H);
-    float stair = ceiling - (STAIR_SILL + STAIR_H);
+    float stair = ceiling - (STAIR_SILL_HI + STAIR_H);
     float entry = ceiling - ENTRY_H;
     TraceLog(LOG_INFO, "panelka: headroom over window %.3f, balcony door %.3f, stair light %.3f, entrance %.3f m",
              win, door, stair, entry);
@@ -1817,11 +1918,11 @@ static void CheckNothingBuried(void)
 // ---------------------------------------------------------------------------
 
 static const char *TYPE_NAME[FR_COUNT] = {
-    "p26", "p32", "p32b", "pstair", "pdoor", "pend",
-    "g26", "g32", "g32b", "gstair", "gdoor",
+    "p26", "p32", "p32b", "pstair", "pstair2", "pdoor", "pend",
+    "g26", "g32", "g32b", "gstair", "gstair2", "gdoor",
     "slab26", "slab32", "roof26", "roof32",
     "xwall", "spine26", "spine32",
-    "balc", "par26", "par32", "parend", "canopy", "vent",
+    "balc", "balcg", "par26", "par32", "parend", "canopy", "vent", "pipe", "mast",
     "birch", "maple", "carbody", "cartrim", "bench", "rugframe", "lamp", "bin",
 };
 
@@ -1911,7 +2012,7 @@ const Scene SCENE = {
         "Dimensions, and where they come from.\n"
         "The series specifies outer panels 2.6 and 3.2 m wide, floor slabs spanning 5.76 m, a 2.5 m clear ceiling, a 0.10 m slab and 0.21 to 0.35 m outer walls.\n"
         "references/panelka/ref_01.png is a plan of one section; scaled by that 5.76 m span it comes out at 66.9 px/m, and reading the section back off that scale gives seven bays of 2.69, 3.24, 2.64, 2.57, 2.54, 3.23 and 2.66 m over an 11.52 m depth between the outer wall centre-lines.\n"
-        "Those are the specified 2.6 and 3.2 m to within 3.5 per cent, so the bays here are 2.6, 3.2, 2.6, 2.6, 2.6, 3.2, 2.6 = 19.40 m per section, the depth is 2 x 5.76 plus one 0.30 m wall, and the storey is 2.5 clear + 0.10 slab + 0.10 of floor build-up = 2.70 m.\n"
+        "Those are the specified 2.6 and 3.2 m to within 3.5 per cent, so the bays here are 2.6, 3.2, 2.6, 2.6, 2.6, 3.2, 2.6 = 19.40 m per section, the depth is 2 x 5.76 plus one 0.30 m wall, and the storey is 2.50 of clear ceiling plus a 0.10 structural slab plus 0.06 of screed = 2.66 m. The screed is the only invented number in that sum.\n"
         "\n"
         "The building is precast panels, not a shell with holes in it.\n"
         "There is one mesh per panel type and a list of 1022 transforms saying where the instances go, which is what makes the joint grid real rather than drawn on, and which is the decomposition the demolition will throw.\n"
@@ -1924,8 +2025,14 @@ const Scene SCENE = {
         "Composition.\n"
         "The stairwell is the middle 2.6 m bay of each section and touches the front facade, so its tall narrow lights are on the front and the entrance is on the back, which is the courtyard side.\n"
         "The two 3.2 m bays of each section carry balconies on both facades and on all five floors, which is what ref_07 shows.\n"
-        "Apartment windows are 1.30 m wide in a 2.6 m bay and 1.50 in a 3.2 m one, 1.45 m tall on a 0.85 m sill, with a centre mullion and a transom; the stair light is 0.95 by 1.30 on a 1.00 m sill, so it reads as a different window rather than the same one moved up.\n"
-        "The end walls are blank: ref_02, ref_05 and ref_07 all show a gable with no openings, which is why ref_04 exists to show one painted instead.\n"
+        "Apartment windows are 1.30 m wide in a 2.6 m bay and 1.50 in a 3.2 m one, 1.45 m tall on a 0.85 m sill, with a centre mullion and a transom.\n"
+        "Stair lights are 1.15 by 1.10 and alternate storey by storey between a 0.45 and a 1.30 m sill. A landing sits half a flight above the floor its panel stands on, so the real rhythm is offset from the apartments\' by half a storey; a one-storey panel cannot carry a light that straddles the slab, and the zigzag is how that offset reads from outside.\n"
+        "Balcony fronts are solid sheet with a capping rail, and four in ten are glazed in to the ceiling above, chosen by a hash of where the balcony is so the same one is always the same one. An earlier build gave every balcony thirteen thin uprights and a rail, and a review read the whole facade as an access gallery; ref_03 and ref_05 both show boxy masses with opaque fronts and a great many enclosed entirely.\n"
+        "Downpipes run at every section joint and gable corner on both facades, in one segment per storey so they break up with the building. They are one of the loudest things on the facade in ref_03 and ref_05 and the first build had none.\n"
+        "The end walls are blank, which ref_02 and ref_07 show and ref_01 draws, and which is why ref_04 exists to show one painted instead; ref_05 is a variant that does put two window columns in its gable.\n"
+        "\n"
+        "The roof is flat, with a 0.32 m upstand under a metal capping that oversails the facade by 0.11.\n"
+        "A review round called that the largest departure from the references, on the grounds that ref_02, ref_03, ref_05 and ref_07 show pitched roofs with eaves. Two of those four do not: ref_03 and ref_05 are both flat with a thin capped cornice, which is what this is. The other two are pitched, and are the metal re-roofing that thousands of these buildings were given in the 1990s because the original roof leaked -- the series specifies the original directly, as a flat non-ventilated roof finished in rolled bitumen. The finding did carry a real one, though: the parapet was 0.45 m of bare upstand where both flat-roofed references show a thin capped cornice.\n"
         "\n"
         "Behind the skin the structure is real, because the demolition has to break it: floor slabs spanning bay by bay from the facade to the central spine, a spine wall segment per bay, and a cross wall on every bay boundary, which is the load-bearing direction in this series.\n"
         "Windows are opaque, not transparent: the alternative is sixty modelled interiors, and a dark pane with a bright frame is what a window reads as from outside on an overcast day anyway.\n"
