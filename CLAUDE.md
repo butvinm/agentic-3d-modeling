@@ -29,6 +29,7 @@ make clean-raylib                    # force a full raylib rebuild
 ./build/humvee --part running_gear   # inspect one part, framed to its own bounds
 ./build/humvee --shots out --frames 6 --size 1600x1200 --supersample 3
 ./build/humvee --shots out --anim --frames 25        # step the pose instead of orbiting the camera
+./build/humvee --shots out --phase 0.0 --frames 4    # freeze the pose at one moment and orbit that
 ./build/humvee --shots out --yaw 140                 # choose the camera angle without editing the model
 
 ./tools/review.sh humvee             # build, render into the next renders/humvee/vN/, critique with Codex
@@ -40,6 +41,8 @@ ANIM=1 ./tools/review.sh humvee
 `--shots` renders N evenly spaced turntable views and exits, printing each written path. Without it the binary opens a window.
 
 `--anim` changes what those N frames vary: the camera holds still at `SCENE.animYaw` and the pose steps through one `SCENE.duration`. It is ignored, with a warning, on a scene that declares no `update`.
+
+`--phase F` is the other half of that: it freezes the pose at fraction F of the cycle and lets the turntable orbit that one moment, which is the only way to see a posed part from several sides at the same instant. It refuses to run with `--anim`, since one steps the pose and the other holds it, and like `--anim` it is ignored with a warning on a scene that declares no `update`. F is cyclic, so 1.5 and 0.5 are the same pose. It also pins the interactive window, which is the cheapest way to walk around one instant by hand.
 
 `--yaw` overrides both: the angle `--anim` holds, the angle a turntable starts from, and the window's opening angle. It exists so `SCENE.animYaw` stays the angle a review is judged at.
 

@@ -153,6 +153,9 @@ static void WriteDescription(const char *outDir)
 // --yaw in degrees, or NAN for the scene's own choice. It exists so an angle can be tried without editing a model, and so SCENE.animYaw stays the angle a review is judged at rather than drifting to whatever framed one sequence nicely.
 static float gYawOverride = NAN;
 
+// --phase pins the pose at one fraction of the cycle, or NAN to let it run. A turntable then orbits that single moment, which is the only way to inspect a posed part at an extreme of its travel: --anim steps the pose but gives every frame a different one, so no two views ever show the same instant. A gas piston stood 23 mm outside its tube for six review rounds because nothing ever framed the forward extreme from more than one angle.
+static float gPhase = NAN;
+
 static float StartYaw(void)
 {
     return isnan(gYawOverride) ? 45.0f : gYawOverride;
@@ -182,7 +185,10 @@ static int RunShots(const char *outDir, int frames, int width, int height, int s
             PoseAt(Duration() * (float)i / (float)frames);
             if (isnan(gYawOverride) && SCENE.animYaw != 0.0f) yaw = SCENE.animYaw;
         }
-        else yaw += 360.0f * (float)i / (float)frames;
+        else {
+            if (!isnan(gPhase)) PoseAt(Duration() * gPhase);
+            yaw += 360.0f * (float)i / (float)frames;
+        }
 
         BeginTextureMode(rt);
             ClearBackground(Background());
@@ -238,7 +244,7 @@ static void RunInteractive(void)
         float wheel = GetMouseWheelMove();
         if (wheel != 0.0f) distance = Clamp(distance * (1.0f - wheel * 0.12f), 0.5f, 1000.0f);
 
-        PoseAt(fmodf((float)GetTime(), Duration()));
+        PoseAt(isnan(gPhase) ? fmodf((float)GetTime(), Duration()) : Duration() * gPhase);
 
         BeginDrawing();
             ClearBackground(Background());
@@ -252,10 +258,11 @@ static void RunInteractive(void)
 
 static void Usage(const char *argv0)
 {
-    printf("usage: %s [--shots DIR] [--anim] [--frames N] [--size WxH] [--supersample N] [--part NAME] [--yaw DEG]\n", argv0);
+    printf("usage: %s [--shots DIR] [--anim] [--phase F] [--frames N] [--size WxH] [--supersample N] [--part NAME] [--yaw DEG]\n", argv0);
     printf("  no args        open an interactive orbit-camera window\n");
     printf("  --shots        render N turntable views to DIR as PNG and exit\n");
     printf("  --anim         with --shots, hold the camera and step the pose through one cycle instead\n");
+    printf("  --phase F      freeze the pose at fraction F of the cycle; the turntable then orbits that one moment\n");
     printf("  --yaw DEG      camera yaw: the angle --anim holds, or the one a turntable starts from\n");
     printf("  --part NAME    render only that part, framed to its own bounds\n");
     printf("  --list-parts   print this scene's part names and exit\n");
@@ -286,6 +293,7 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) frames = atoi(argv[++i]);
         else if (strcmp(argv[i], "--supersample") == 0 && i + 1 < argc) ss = atoi(argv[++i]);
         else if (strcmp(argv[i], "--yaw") == 0 && i + 1 < argc) gYawOverride = (float)atof(argv[++i]);
+        else if (strcmp(argv[i], "--phase") == 0 && i + 1 < argc) gPhase = (float)atof(argv[++i]);
         else if (strcmp(argv[i], "--list-parts") == 0) {
             for (int p = 0; p < SCENE.partCount; p++) printf("%s\n", SCENE.parts[p].name);
             return 0;
@@ -301,7 +309,14 @@ int main(int argc, char **argv)
 
     if (frames < 1) frames = 1;
     if (ss < 1) ss = 1;
+
     if (width < 16 || height < 16) { fprintf(stderr, "--size too small\n"); return 2; }
+
+    if (anim && !isnan(gPhase)) {
+        fprintf(stderr, "--anim and --phase contradict: one steps the pose, the other freezes it\n");
+        return 2;
+    }
+    if (!isnan(gPhase)) gPhase -= floorf(gPhase);
 
     if (partName) {
         if (SCENE.partCount == 0) {
@@ -333,6 +348,10 @@ int main(int argc, char **argv)
     if (anim && !SCENE.update) {
         TraceLog(LOG_WARNING, "HARNESS: --anim ignored, scene '%s' has no update callback", SCENE.name);
         anim = false;
+    }
+    if (!isnan(gPhase) && !SCENE.update) {
+        TraceLog(LOG_WARNING, "HARNESS: --phase ignored, scene '%s' has no update callback", SCENE.name);
+        gPhase = NAN;
     }
 
     int rc = 0;
