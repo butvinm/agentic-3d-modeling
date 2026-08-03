@@ -28,6 +28,17 @@ A part is posable when three things are true:
 
 **Sampling an axis proves nothing about a body with thickness.** `models/ak47.c` checked its ejected case's centreline against the ejection port and reported a clean pass; the case is 11.35 mm thick against a 17 mm opening, and sampling its surface instead showed brass going through the plate. Two further defects were hidden the same way: a bound checked in one axis but not the other, and a clearance that only held because the extreme was never sampled. Sample the envelope, at a resolution finer than the margin you are claiming: a 16-point ring on a 5.7 mm radius resolves to 0.11 mm, so it can support a 1.2 mm margin and could not have supported the 0.1 mm one an 8-point ring first reported.
 
+**A check's authority is its coverage, not its margin.** `CheckAction` reported the gas piston head "112 mm spare" inside its tube, and that comfortable number is exactly why nothing looked again: it tested the head's aft extreme against the tube's rear end and never its forward extreme against the front cap, where 23 mm of piston stood in open air through every frame the carrier was forward. Six review rounds passed over it and the user found it by eye. Say in the log line what a check does not cover, so a passing number cannot be read as more than it is: "aft end only" would have been the whole fix. The rest position was also a typed literal rather than derived from the tube it sits in, which is `.claude/skills/modeling/SKILL.md:50` applied to a part that moves.
+
+**Render both ends of every travel before spending a review round.** `--phase F` freezes the pose at one fraction of the cycle, so a turntable orbits that single moment. `--anim` cannot answer this question: it gives every frame a different pose, so no two views ever show the same instant, and a defect that exists only at one end of a stroke gets one small oblique look. Pair it with `--part`, whose framing is what makes a 23 mm feature on a 900 mm rifle visible at all rather than a few pixels in a contact sheet.
+
+```sh
+./build/ak47 --shots renders/ak47/ends/battery --part bolt_carrier --phase 0.0 --frames 4
+./build/ak47 --shots renders/ak47/ends/rear --part bolt_carrier --phase 0.05 --frames 4
+```
+
+Read those two phases off the model's own timing constants rather than guessing them, and give each its own directory: the harness numbers files by frame index, so a second run into the same directory overwrites the first.
+
 **Playback speed is one constant, and it is not the geometry.** `models/ak47.c` keeps `SLOWDOWN` as the only quantity about playback rather than about the rifle, and `CYCLE` is `TOTAL_T * SLOWDOWN`. It scales the interactive window and `SCENE.duration` and nothing else, since `--anim` samples N evenly spaced phases whatever it is set to. A model can equally derive everything from its cycle instead, as `models/humvee.c` does by computing `SPEED` from `CYCLE`, in which case the cycle is already real time. Either is fine; say which.
 
 Watch for constants that couple to it. `models/ak47.c` holds a muzzle flash for a minimum of `FLASH_MIN_PLAYBACK` of playback time so a 60 Hz window cannot drop a 3 ms event, and that floor is divided by `SLOWDOWN`, so changing the playback rate changes how many rendered frames a flash occupies. Count the affected frames before and after rather than assuming a playback constant cannot reach the renders.
