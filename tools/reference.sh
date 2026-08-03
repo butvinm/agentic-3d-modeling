@@ -12,7 +12,10 @@ cd "$ROOT"
 DIR="references/$MODEL"
 
 ListImages() {
-    find "$DIR" -maxdepth 1 -type f \( -name '*.png' -o -name '*.jpg' -o -name '*.webp' \) 2>/dev/null | sort
+    # -iname, and .jpeg alongside .jpg: this script normalises what it downloads, but a reference
+    # copied in by hand or salvaged from a worktree keeps whatever extension it arrived with, and
+    # missing one here drops it from the review silently.
+    find "$DIR" -maxdepth 1 -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.webp' \) 2>/dev/null | sort
 }
 
 if [ "${1:-}" = "--list" ]; then

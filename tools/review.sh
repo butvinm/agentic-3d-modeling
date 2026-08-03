@@ -69,7 +69,7 @@ for shot in "$OUT"/*.png; do IMAGES+=(-i "$shot"); done
 
 REFS=()
 while IFS= read -r ref; do REFS+=("$ref"); IMAGES+=(-i "$ref"); done < <(
-    find "references/$MODEL" -maxdepth 1 -type f \( -name '*.png' -o -name '*.jpg' -o -name '*.webp' \) 2>/dev/null | sort
+    find "references/$MODEL" -maxdepth 1 -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.webp' \) 2>/dev/null | sort
 )
 
 REF_NOTE=""
