@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Render a model's turntable views into the next renders/<model>/vN/ and ask Codex to critique them.
 # usage: tools/review.sh <model-name> [extra instructions...]
-# env:   FRAMES=4  PART=<part-name>  ANIM=1
+# env:   FRAMES=4  PART=<part-name>  ANIM=1  PHASE=<0..1>  YAW=<degrees>
 set -euo pipefail
 
 MODEL="${1:?usage: tools/review.sh <model-name> [extra instructions...]}"
@@ -17,6 +17,13 @@ SRC="models/$MODEL.c"
 FRAMES="${FRAMES:-4}"
 PART="${PART:-}"
 ANIM="${ANIM:-}"
+YAW="${YAW:-}"
+PHASE="${PHASE:-}"
+
+if [ -n "$ANIM" ] && [ -n "$PHASE" ]; then
+    echo "ANIM and PHASE contradict: one steps the pose, the other freezes it" >&2
+    exit 1
+fi
 
 BASE="renders/$MODEL"
 mkdir -p "$BASE"
@@ -41,6 +48,19 @@ Judge whether the parts stay connected as they move: a joint that separates, a p
 that passes through another, or a travel that runs past its own guide will show up
 in some frames and not others. A defect visible in only one frame is still a defect."
 fi
+
+if [ -n "$PHASE" ]; then
+    SHOT_ARGS+=(--phase "$PHASE")
+    FRAMING="taken at evenly spaced camera angles around it, with the pose frozen at one
+single instant of its cycle, so every frame shows that same instant from a different
+side. Judge the pose itself rather than the motion: a part that has travelled outside
+the guide it runs in, or clear of the parent it is meant to stay buried in, is visible
+from some angles and hidden from others."
+fi
+
+if [ -n "$YAW" ]; then
+    SHOT_ARGS+=(--yaw "$YAW")
+fi
 "./build/$MODEL" "${SHOT_ARGS[@]}" >/dev/null
 
 IMAGES=()
@@ -49,7 +69,7 @@ for shot in "$OUT"/*.png; do IMAGES+=(-i "$shot"); done
 
 REFS=()
 while IFS= read -r ref; do REFS+=("$ref"); IMAGES+=(-i "$ref"); done < <(
-    find "references/$MODEL" -maxdepth 1 -type f \( -name '*.png' -o -name '*.jpg' -o -name '*.webp' \) 2>/dev/null | sort
+    find "references/$MODEL" -maxdepth 1 -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.webp' \) 2>/dev/null | sort
 )
 
 REF_NOTE=""

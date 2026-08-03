@@ -96,18 +96,27 @@ static void FrameBounds(BoundingBox box, Vector3 *target, float *distance)
     *distance = radius / sinf(FOVY * DEG2RAD * 0.5f) * 1.15f;
 }
 
+// --target and --radius aim the camera at a point the model never declared as a part. Inspecting a detail otherwise means rendering the whole model and cropping the PNG afterwards, which two sessions did thirty-three times between them, once at the wrong coordinates because the crop box was guessed rather than derived. A part's own bounds are still the better lever when the detail happens to be a part; these are for everything else.
+static bool gTargetSet = false;
+static Vector3 gTarget;
+static float gRadius = NAN;
+
 static void SceneFraming(Vector3 *target, float *distance, float *pitchDeg)
 {
     if (activePart && activePart->bounds) {
         FrameBounds(activePart->bounds(), target, distance);
         *pitchDeg = 22.0f;
-        return;
     }
-    float r = OrbitRadius();
-    float h = SCENE.orbitHeight;
-    *target = SCENE.target;
-    *distance = sqrtf(r * r + h * h);
-    *pitchDeg = atan2f(h, r) * RAD2DEG;
+    else {
+        float r = OrbitRadius();
+        float h = SCENE.orbitHeight;
+        *target = SCENE.target;
+        *distance = sqrtf(r * r + h * h);
+        *pitchDeg = atan2f(h, r) * RAD2DEG;
+    }
+
+    if (gTargetSet) *target = gTarget;
+    if (!isnan(gRadius)) *distance = gRadius;
 }
 
 static void DrawWorld(Camera3D cam)
@@ -153,6 +162,9 @@ static void WriteDescription(const char *outDir)
 // --yaw in degrees, or NAN for the scene's own choice. It exists so an angle can be tried without editing a model, and so SCENE.animYaw stays the angle a review is judged at rather than drifting to whatever framed one sequence nicely.
 static float gYawOverride = NAN;
 
+// --phase pins the pose at one fraction of the cycle, or NAN to let it run. A turntable then orbits that single moment, which is the only way to inspect a posed part at an extreme of its travel: --anim steps the pose but gives every frame a different one, so no two views ever show the same instant. A gas piston stood 23 mm outside its tube for six review rounds because nothing ever framed the forward extreme from more than one angle.
+static float gPhase = NAN;
+
 static float StartYaw(void)
 {
     return isnan(gYawOverride) ? 45.0f : gYawOverride;
@@ -182,7 +194,10 @@ static int RunShots(const char *outDir, int frames, int width, int height, int s
             PoseAt(Duration() * (float)i / (float)frames);
             if (isnan(gYawOverride) && SCENE.animYaw != 0.0f) yaw = SCENE.animYaw;
         }
-        else yaw += 360.0f * (float)i / (float)frames;
+        else {
+            if (!isnan(gPhase)) PoseAt(Duration() * gPhase);
+            yaw += 360.0f * (float)i / (float)frames;
+        }
 
         BeginTextureMode(rt);
             ClearBackground(Background());
@@ -266,6 +281,7 @@ static void RunInteractive(void)
         float wheel = GetMouseWheelMove();
         if (wheel != 0.0f) distance = Clamp(distance * (1.0f - wheel * 0.12f), 0.5f, 1000.0f);
 
+        // --phase pins the pose, so the playback keys have nothing to drive and are left inert rather than silently fighting the pin.
         if (posed) {
             // Auto-repeat as well as the initial press, because a tenth of a step is thirty presses from real time to the top stop and nobody taps a key thirty times.
             if (Tapped(KEY_LEFT_BRACKET) && speedTenths > POSE_SPEED_MIN) speedTenths--;
@@ -274,16 +290,20 @@ static void RunInteractive(void)
             // Accumulated rather than read back off GetTime(), so a speed change carries the pose on from where it is. Scaling the clock instead rescales the whole history behind it and jumps the model to an unrelated phase on every keypress.
             if (!posePaused) poseT = fmodf(poseT + GetFrameTime() * (float)speedTenths * 0.1f, Duration());
         }
-        PoseAt(poseT);
+        PoseAt(isnan(gPhase) ? poseT : Duration() * gPhase);
 
         BeginDrawing();
             ClearBackground(Background());
             DrawWorld(CameraOrbit(target, distance, pitch, yaw));
             DrawText(activePart ? activePart->name : (SCENE.name ? SCENE.name : "scene"), 12, 12, 20, RAYWHITE);
-            DrawText(posed ? "drag: orbit | wheel: zoom | space: auto-spin | [ ]: speed | P: pause | R: reset | ESC: quit"
+            DrawText(posed && isnan(gPhase)
+                         ? "drag: orbit | wheel: zoom | space: auto-spin | [ ]: speed | P: pause | R: reset | ESC: quit"
                            : "drag: orbit | wheel: zoom | space: auto-spin | R: reset | ESC: quit",
                      12, 38, 14, GRAY);
-            if (posed) {
+            if (posed && !isnan(gPhase)) {
+                DrawText(TextFormat("pose PINNED by --phase at %.2f / %.2f s", Duration() * gPhase, Duration()),
+                         12, 58, 14, (Color){ 235, 190, 90, 255 });
+            } else if (posed) {
                 DrawText(TextFormat("pose %.1fx%s  %.2f / %.2f s", (float)speedTenths * 0.1f, posePaused ? " PAUSED" : "", poseT, Duration()),
                          12, 58, 14, posePaused ? (Color){ 235, 190, 90, 255 } : GRAY);
             }
@@ -294,11 +314,14 @@ static void RunInteractive(void)
 
 static void Usage(const char *argv0)
 {
-    printf("usage: %s [--shots DIR] [--anim] [--frames N] [--size WxH] [--supersample N] [--part NAME] [--yaw DEG]\n", argv0);
+    printf("usage: %s [--shots DIR] [--anim] [--phase F] [--frames N] [--size WxH] [--supersample N] [--part NAME] [--yaw DEG] [--target X,Y,Z] [--radius R]\n", argv0);
     printf("  no args        open an interactive orbit-camera window\n");
     printf("  --shots        render N turntable views to DIR as PNG and exit\n");
     printf("  --anim         with --shots, hold the camera and step the pose through one cycle instead\n");
+    printf("  --phase F      freeze the pose at fraction F of the cycle; the turntable then orbits that one moment\n");
     printf("  --yaw DEG      camera yaw: the angle --anim holds, or the one a turntable starts from\n");
+    printf("  --target X,Y,Z aim the camera at a point rather than at the scene's own target\n");
+    printf("  --radius R     orbit at that distance, to look closely at a detail that is not a part\n");
     printf("  --part NAME    render only that part, framed to its own bounds\n");
     printf("  --list-parts   print this scene's part names and exit\n");
 }
@@ -328,6 +351,15 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) frames = atoi(argv[++i]);
         else if (strcmp(argv[i], "--supersample") == 0 && i + 1 < argc) ss = atoi(argv[++i]);
         else if (strcmp(argv[i], "--yaw") == 0 && i + 1 < argc) gYawOverride = (float)atof(argv[++i]);
+        else if (strcmp(argv[i], "--phase") == 0 && i + 1 < argc) gPhase = (float)atof(argv[++i]);
+        else if (strcmp(argv[i], "--radius") == 0 && i + 1 < argc) gRadius = (float)atof(argv[++i]);
+        else if (strcmp(argv[i], "--target") == 0 && i + 1 < argc) {
+            if (sscanf(argv[++i], "%f,%f,%f", &gTarget.x, &gTarget.y, &gTarget.z) != 3) {
+                fprintf(stderr, "bad --target, expected X,Y,Z\n");
+                return 2;
+            }
+            gTargetSet = true;
+        }
         else if (strcmp(argv[i], "--list-parts") == 0) {
             for (int p = 0; p < SCENE.partCount; p++) printf("%s\n", SCENE.parts[p].name);
             return 0;
@@ -343,7 +375,14 @@ int main(int argc, char **argv)
 
     if (frames < 1) frames = 1;
     if (ss < 1) ss = 1;
+
     if (width < 16 || height < 16) { fprintf(stderr, "--size too small\n"); return 2; }
+
+    if (anim && !isnan(gPhase)) {
+        fprintf(stderr, "--anim and --phase contradict: one steps the pose, the other freezes it\n");
+        return 2;
+    }
+    if (!isnan(gPhase)) gPhase -= floorf(gPhase);
 
     if (partName) {
         if (SCENE.partCount == 0) {
@@ -375,6 +414,10 @@ int main(int argc, char **argv)
     if (anim && !SCENE.update) {
         TraceLog(LOG_WARNING, "HARNESS: --anim ignored, scene '%s' has no update callback", SCENE.name);
         anim = false;
+    }
+    if (!isnan(gPhase) && !SCENE.update) {
+        TraceLog(LOG_WARNING, "HARNESS: --phase ignored, scene '%s' has no update callback", SCENE.name);
+        gPhase = NAN;
     }
 
     int rc = 0;
