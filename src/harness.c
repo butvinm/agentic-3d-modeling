@@ -214,6 +214,25 @@ static int RunShots(const char *outDir, int frames, int width, int height, int s
     return 0;
 }
 
+// Playback speed for the window, and for the window only: --shots --anim samples N evenly spaced phases of the cycle, so a rendered sequence comes out identical whatever this is set to. It is the same separation a model's own playback constant makes, moved to the harness so every model gets it and no model has to be edited to look at its own motion slowly.
+// Held in tenths as an integer rather than as a float stepped by 0.1f. A tenth is not representable in binary, so an accumulated float lands on 0.7000001 after a few presses, prints that on the HUD and misses its own end stops by a hair. Counting tenths is exact, and the float the pose clock wants is one multiply away.
+#define POSE_SPEED_MIN   1     // 0.1x. The bottom stop is not zero, because stopping the pose is P's job and a speed control that silently freezes the model is a worse pause than the pause.
+#define POSE_SPEED_MAX   40    // 4.0x
+#define POSE_SPEED_REAL  10    // 1.0x, the speed the model claims to run at
+
+// A press, or the key repeating while it is held down.
+static bool Tapped(int key) { return IsKeyPressed(key) || IsKeyPressedRepeat(key); }
+
+// Where the window opens and what R comes back to. A scene that says nothing gets real time.
+static int DefaultSpeedTenths(void)
+{
+    if (SCENE.previewSpeed <= 0.0f) return POSE_SPEED_REAL;
+    long t = lroundf(SCENE.previewSpeed * 10.0f);
+    if (t < POSE_SPEED_MIN) t = POSE_SPEED_MIN;
+    if (t > POSE_SPEED_MAX) t = POSE_SPEED_MAX;
+    return (int)t;
+}
+
 static void RunInteractive(void)
 {
     Vector3 target;
@@ -224,6 +243,12 @@ static void RunInteractive(void)
     float yaw = StartYaw();
     bool spinning = true;
 
+    // A scene with no update has no pose to slow down, so it gets neither the keys nor the line of HUD telling it about them.
+    const bool posed = SCENE.update != NULL;
+    int speedTenths = DefaultSpeedTenths();
+    bool posePaused = false;
+    float poseT = 0.0f;
+
     while (!WindowShouldClose()) {
         if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
             Vector2 delta = GetMouseDelta();
@@ -232,19 +257,36 @@ static void RunInteractive(void)
             spinning = false;
         }
         if (IsKeyPressed(KEY_SPACE)) spinning = !spinning;
-        if (IsKeyPressed(KEY_R)) { pitch = startPitch; distance = startDistance; yaw = StartYaw(); }
+        if (IsKeyPressed(KEY_R)) {
+            pitch = startPitch; distance = startDistance; yaw = StartYaw();
+            speedTenths = DefaultSpeedTenths(); posePaused = false;
+        }
         if (spinning) yaw += 28.0f * GetFrameTime();
 
         float wheel = GetMouseWheelMove();
         if (wheel != 0.0f) distance = Clamp(distance * (1.0f - wheel * 0.12f), 0.5f, 1000.0f);
 
-        PoseAt(fmodf((float)GetTime(), Duration()));
+        if (posed) {
+            // Auto-repeat as well as the initial press, because a tenth of a step is thirty presses from real time to the top stop and nobody taps a key thirty times.
+            if (Tapped(KEY_LEFT_BRACKET) && speedTenths > POSE_SPEED_MIN) speedTenths--;
+            if (Tapped(KEY_RIGHT_BRACKET) && speedTenths < POSE_SPEED_MAX) speedTenths++;
+            if (IsKeyPressed(KEY_P)) posePaused = !posePaused;
+            // Accumulated rather than read back off GetTime(), so a speed change carries the pose on from where it is. Scaling the clock instead rescales the whole history behind it and jumps the model to an unrelated phase on every keypress.
+            if (!posePaused) poseT = fmodf(poseT + GetFrameTime() * (float)speedTenths * 0.1f, Duration());
+        }
+        PoseAt(poseT);
 
         BeginDrawing();
             ClearBackground(Background());
             DrawWorld(CameraOrbit(target, distance, pitch, yaw));
             DrawText(activePart ? activePart->name : (SCENE.name ? SCENE.name : "scene"), 12, 12, 20, RAYWHITE);
-            DrawText("drag: orbit | wheel: zoom | space: auto-spin | R: reset | ESC: quit", 12, 38, 14, GRAY);
+            DrawText(posed ? "drag: orbit | wheel: zoom | space: auto-spin | [ ]: speed | P: pause | R: reset | ESC: quit"
+                           : "drag: orbit | wheel: zoom | space: auto-spin | R: reset | ESC: quit",
+                     12, 38, 14, GRAY);
+            if (posed) {
+                DrawText(TextFormat("pose %.1fx%s  %.2f / %.2f s", (float)speedTenths * 0.1f, posePaused ? " PAUSED" : "", poseT, Duration()),
+                         12, 58, 14, posePaused ? (Color){ 235, 190, 90, 255 } : GRAY);
+            }
             DrawFPS(GetScreenWidth() - 90, 12);
         EndDrawing();
     }

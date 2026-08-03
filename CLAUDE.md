@@ -24,7 +24,7 @@ make clean                           # remove build/ and renders/
 make raylib                          # build the vendored static lib (auto-run on first build)
 make clean-raylib                    # force a full raylib rebuild
 
-./build/humvee                       # interactive window: drag to orbit, wheel zooms, space toggles spin, R resets
+./build/humvee                       # interactive window: drag to orbit, wheel zooms, space toggles spin, [ and ] set playback speed, P pauses the pose, R resets
 ./build/humvee --list-parts          # print this model's part names
 ./build/humvee --part running_gear   # inspect one part, framed to its own bounds
 ./build/humvee --shots out --frames 6 --size 1600x1200 --supersample 3
@@ -42,6 +42,8 @@ ANIM=1 ./tools/review.sh humvee
 `--anim` changes what those N frames vary: the camera holds still at `SCENE.animYaw` and the pose steps through one `SCENE.duration`. It is ignored, with a warning, on a scene that declares no `update`.
 
 `--yaw` overrides both: the angle `--anim` holds, the angle a turntable starts from, and the window's opening angle. It exists so `SCENE.animYaw` stays the angle a review is judged at.
+
+`[` and `]` step the window's playback speed down and up by 0.1, from 0.1x to 4.0x, and both auto-repeat when held. `P` pauses the pose where it is; the speed's bottom stop is 0.1x rather than zero, so stopping stays something you ask for explicitly. They belong to the window and change nothing that is rendered: `--anim` samples N evenly spaced phases of `SCENE.duration` regardless, so the same frames come out at any speed. The HUD shows the current speed and where the pose is in its cycle. A scene with no `update` gets neither the keys nor that line, since it has no pose to slow down.
 
 After a fresh clone: `git submodule update --init` then `make`.
 

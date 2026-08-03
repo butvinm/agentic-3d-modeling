@@ -17,6 +17,7 @@ const Scene SCENE = {
     .update = Update,         // optional; called with the pose time before every draw
     .duration = 2.4f,         // seconds in one cycle of that motion
     .animYaw = 90.0f,         // camera yaw --anim holds; 0 means the default 45
+    .previewSpeed = 0.6f,     // window playback rate; 0 means 1.0. Never scale .duration to slow a preview
     .parts = PARTS,           // optional
     .partCount = 3,
     .target = { 0, 0, 0 },    // camera look-at
