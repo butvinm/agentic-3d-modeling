@@ -13,6 +13,12 @@ Find candidate images with WebSearch, then pass the image URLs to the script: it
 
 Get views that answer the questions geometry actually poses: a straight side elevation, a front and rear elevation, and a three-quarter view. A single hero shot will not tell you where a pillar meets a door.
 
+**Check the image can carry the measurement before making it.** Two shape claims here were wrong because they were read off a 406 px wide photograph, which cannot separate a gently steepening curve from a flat panel with a crease in it. Both were corrected by the user, and both had already reached a commit message and a `SCENE.description` by then. Quote the scale in pixels per metre before quoting a dimension, and if it is not enough to resolve the feature, go and find a better view rather than a better adjective.
+
+**Scale a reference by a dimension you trust, then read a second one back to check it.** A side elevation of the truck came out at 403 px/m off the 3.30 m wheelbase, and reading the overall length back gave 4.54 m against a 4.57 m specification, so the scale was known good to under a percent before any claim rested on it. Overlaying a metric grid on the image with PIL and reading coordinates off that beats eyeballing proportions: it is what turned "the hood looks too long" into "1.46 m against the reference's 0.90".
+
+**A fidelity reading can become a build-time check.** `CheckHoodProfile` (`models/humvee.c:2402`) holds six height readings taken off the reference and reports the model's deviation from them on every build. That turns the most argued-about class of finding into the same kind of measured claim as a clearance, and unlike a number in a critique it outlives the session that took it.
+
 `tools/review.sh` attaches everything in `references/<model>/` to the Codex review automatically and tells it to trust the references over the description. With no references saved it instead instructs Codex not to assert what the real object looks like, and prints a warning.
 
 ## Reviewing with Codex
