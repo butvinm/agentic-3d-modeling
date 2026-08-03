@@ -1524,6 +1524,74 @@ static BoundingBox gFlashLocal;
 static Matrix gFlashX;
 static bool gFlashOn;
 
+// The halo, and the light the flash is made of rather than the shape of it.
+// This is models/humvee.c's lamp glow, brought over unchanged where it can be: a white map whose only variation is alpha, falling off as (1-r)^1.6 from the centre, drawn unlit and ADDITIVELY so what lands on the frame is light added to it rather than an object painted over it. Additive is the half that matters. The star on its own is an orange solid with a hard silhouette, which is what a lit muzzle flash always looks like and why FinishUnlit exists; adding it instead of drawing it is what makes it read as emission.
+// A squared-ish falloff gives a bright core with a soft skirt. A linear ramp reads as a flat disc with a hard edge, which is the thing being fixed.
+static Builder gHaloB;
+static Model gHaloM;
+static Texture2D gGlowTex;
+
+#define GLOW_TEX_SIZE 128
+
+static Texture2D MakeGlowTexture(void)
+{
+    Image img = GenImageColor(GLOW_TEX_SIZE, GLOW_TEX_SIZE, WHITE);
+    Color *px = (Color *)img.data;
+    for (int y = 0; y < GLOW_TEX_SIZE; y++) {
+        for (int x = 0; x < GLOW_TEX_SIZE; x++) {
+            float dx = ((float)x + 0.5f) / (float)GLOW_TEX_SIZE - 0.5f;
+            float dy = ((float)y + 0.5f) / (float)GLOW_TEX_SIZE - 0.5f;
+            float r = sqrtf(dx * dx + dy * dy) / 0.5f;
+            float a = (r >= 1.0f) ? 0.0f : powf(1.0f - r, 1.6f);
+            px[y * GLOW_TEX_SIZE + x] = (Color){ 255, 255, 255, (unsigned char)(a * 255.0f) };
+        }
+    }
+    Texture2D t = LoadTextureFromImage(img);
+    UnloadImage(img);
+    SetTextureFilter(t, TEXTURE_FILTER_BILINEAR);
+    SetTextureWrap(t, TEXTURE_WRAP_CLAMP);
+    return t;
+}
+
+// One halo disc with polar UVs, so the radial falloff lands square on it. axis names the coordinate the disc's normal runs along.
+// Wound both ways, because a halo has no back: whichever face is toward the camera is the one that survives culling and the other is discarded, so exactly one is ever drawn.
+static void GlowDisc(Builder *b, Vector3 c, float r, int axis)
+{
+    static const int U[3] = { 1, 2, 0 };
+    static const int V[3] = { 2, 0, 1 };
+    const int SEG = 28;
+    float n3[3] = { 0.0f, 0.0f, 0.0f };
+    n3[axis] = 1.0f;
+    Vector3 n = { n3[0], n3[1], n3[2] };
+
+    int centre = Vert(b, c, n, (Vector2){ 0.5f, 0.5f });
+    int prev = 0;
+    for (int i = 0; i <= SEG; i++) {
+        float a = 2.0f * PI * (float)i / (float)SEG;
+        float ca = cosf(a), sa = sinf(a);
+        float p3[3] = { c.x, c.y, c.z };
+        p3[U[axis]] += r * ca;
+        p3[V[axis]] += r * sa;
+        int v = Vert(b, (Vector3){ p3[0], p3[1], p3[2] }, n, (Vector2){ 0.5f + 0.5f * ca, 0.5f + 0.5f * sa });
+        if (i > 0) { Tri(b, centre, prev, v); Tri(b, centre, v, prev); }
+        prev = v;
+    }
+}
+
+// The humvee hangs one disc per lamp facing straight down the vehicle axis, and can, because a lamp is looked at from in front of it. A muzzle is looked at from the side: SCENE.animYaw is 20 degrees off a flank view, and a disc square to the bore would be edge on and invisible at exactly the angle every review of this model is judged at.
+// So three orthogonal discs per halo rather than one. At any camera angle at least one of the three is well away from edge on, and the two that are nearly edge on contribute a thin cross of light that reads as flare rather than as a mistake. It is the one place this departs from the humvee, and the reason is the viewing angle and not the technique.
+static void BuildHalo(void)
+{
+    Builder *h = &gHaloB;
+    gOrigin = (Vector3){ 0.0f, BORE, 0.0f };
+    // Forward is -z. The wide halo sits over the fireball's widest station, the tight one over the muzzle face itself, and the two add where they overlap, which is what puts the hot core in the middle.
+    for (int axis = 0; axis < 3; axis++) {
+        GlowDisc(h, (Vector3){ 0.0f, BORE, -26.0f }, 96.0f, axis);
+        GlowDisc(h, (Vector3){ 0.0f, BORE,  -4.0f }, 42.0f, axis);
+    }
+    gOrigin = STATIC_ORIGIN;
+}
+
 static void BuildFlash(void)
 {
     Builder *f = &gFlashB;
@@ -2019,11 +2087,19 @@ static void Init(void)
     GroupFinish(&gCase, "case");
 
     BuildFlash();
+    BuildHalo();
     MakePuffs();
     BuildPuff();
     gFlashM = FinishUnlit(&gFlashB, "muzzle_flash");
+    gHaloM = FinishUnlit(&gHaloB, "muzzle_halo");
     gPuffM = FinishUnlit(&gPuffB, "smoke");
+    gGlowTex = MakeGlowTexture();
+    gHaloM.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = gGlowTex;
+    // The halo is the outer bound of the flash: it reaches 96 mm where the star reaches about 100, but it is centred forward of the star's root and a part framed to the star alone would clip it.
     gFlashLocal = GetModelBoundingBox(gFlashM);
+    BoundingBox hb = GetModelBoundingBox(gHaloM);
+    gFlashLocal.min = Vector3Min(gFlashLocal.min, hb.min);
+    gFlashLocal.max = Vector3Max(gFlashLocal.max, hb.max);
     gPuffLocal = GetModelBoundingBox(gPuffM);
 
     CheckAction();
@@ -2046,6 +2122,8 @@ static void Unload(void)
     GroupUnload(&gTrigger);
     GroupUnload(&gCase);
     UnloadModel(gFlashM);
+    // This takes the glow texture with it: UnloadMaterial frees every map whose texture is not raylib's default. That is only safe while one model holds it, which is the difference from models/humvee.c, where three glow materials share one texture and only the owner may unload it. A second user here has to take the texture out of this model's material first.
+    UnloadModel(gHaloM);
     UnloadModel(gPuffM);
     UnloadTextures();
 }
@@ -2069,11 +2147,19 @@ static void DrawCase(void)
     }
 }
 
+// Depth writes off and additive, which is the humvee's glow pass: two haloes over one another should read as one brighter patch rather than as a step, and the star should light the frame rather than mask it. Depth testing stays ON, so the handguard still hides the part of the halo behind it.
+// The halo goes down first and the star over it, so the star's white-hot core sits on top of the skirt rather than under it. With additive the order does not change the sum, but it does decide which one the depth test rejects if anything ever sits between them.
 static void DrawFlash(void)
 {
     if (!gFlashOn) return;
+    rlDisableDepthMask();
+    BeginBlendMode(BLEND_ADDITIVE);
+    gHaloM.transform = gFlashX;
+    DrawModel(gHaloM, Vector3Zero(), 1.0f, (Color){ 255, 168, 86, 255 });
     gFlashM.transform = gFlashX;
     DrawModel(gFlashM, Vector3Zero(), 1.0f, WHITE);
+    EndBlendMode();
+    rlEnableDepthMask();
 }
 
 // Depth writes off, and last in the part list, so the puffs blend with each other and with the rifle instead of the nearest-drawn one punching a hole in the ones behind it. They still depth-test, so smoke behind the receiver stays behind it.
@@ -2174,7 +2260,9 @@ const Scene SCENE = {
         "The two responses have DIFFERENT time constants on purpose, and that is the whole of why a burst climbs. The shoulder absorbs the rearward push and gives it back inside 60 ms, which is less than the 100 ms between rounds, so the linear recoil is spent before the next round fires and does not accumulate: every shot moves the rifle back the same 24.6 mm. The arms let the muzzle rise and bring it down over 220 ms, which is longer than the gap, so the second round lands on top of the first and the third on top of both. Peak climb is 3.53 degrees against the 2.33 a single round gives, lifting the muzzle 53 mm rather than 10.\n"
         "Both time constants are chosen rather than derived, as the single-shot shoulder always was; what is derived is the impulse each round delivers. CheckAction reports both figures beside their single-shot values, so the accumulation is visible as a number and not just asserted. The rifle is back to battery, level, at the end of the cycle. The propellant gas is left out of the impulse, which would add roughly a third again, because no reference consulted gives a charge mass for 7.62x39.\n"
         "\n"
-        "muzzle_flash: one unlit mesh at the muzzle, a spindle along the bore and six radial spikes about 140 mm long and 190 mm across, white-hot at the muzzle face and falling to orange at the tips through vertex colour. The AK-47 has no flash hider, so it is a broad open star rather than the narrow petals a pronged device makes. The size is judged, not measured. It is deliberately NOT given the lighting shader: nothing in lighting.fs adds emission, so a lit flash is a yellow plastic cone that gets darker away from the key light.\n"
+        "muzzle_flash: a star and a halo, both unlit and both drawn ADDITIVELY with depth writes off, which is models/humvee.c's lamp glow applied to a muzzle. The star is a spindle along the bore and seven radial spikes about 140 mm long and 190 mm across, white-hot at the muzzle face and falling to orange at the tips through vertex colour; the AK-47 has no flash hider, so it is a broad open star rather than the narrow petals a pronged device makes, and its size is judged rather than measured. The halo is the humvee's map unchanged, white with only its alpha varying, falling off as one minus r to the 1.6 from the centre so there is a bright core with a soft skirt rather than a flat disc with a hard edge.\n"
+        "Additive is the half that matters. Neither piece is given the lighting shader, because nothing in lighting.fs adds emission and a lit flash is a yellow plastic cone that gets darker away from the key light; but an unlit star drawn normally is still an orange solid with a hard silhouette. Adding it to the frame instead of painting it over the frame is what makes it read as light.\n"
+        "Where this departs from the humvee is the number of discs, and the reason is the viewing angle rather than the technique. The humvee hangs one disc per lamp facing straight down the vehicle axis and can, because a lamp is looked at from in front of it. A muzzle is looked at from the side: animYaw is 20 degrees off a flank view, and a disc square to the bore would be edge on and invisible at exactly the angle every review of this model is judged at. So each halo is three orthogonal discs, of which at least one is always well away from edge on; the two that are near edge on contribute a thin cross of light that reads as flare. Two haloes, 96 mm over the fireball's widest station and 42 mm over the muzzle face, add where they overlap and that is what puts the hot core in the middle.\n"
         "smoke: one lumpy unit blob drawn twenty-eight times per round, eighty-four times in all, with a scale, a fixed orientation and a translation, since a puff differs from its neighbours only in where it is, how far it has grown and how faded it is. Twenty-two puffs ride the gas jet forward from the muzzle at up to 3 m/s, six much fainter ones leave the ejection port once the action has opened it. Transparent and therefore also unlit: lighting.fs:73 computes alpha as texelColor.a*(tint.a + 1.0), which is at or above 1.0 for every tint, so that shader cannot carry transparency at all. Depth writes are off while the puffs draw and the smoke is drawn last, so they blend with each other and with the rifle instead of punching holes in one another.\n"
         "Many faint puffs rather than a few solid ones, because a closed surface has a hard silhouette at any subdivision: at the alpha needed to be seen at all, one blob is a grey rock. Overlapping twenty-eight at about a sixth of that alpha, over a four-to-one spread of sizes, puts density in the middle and lets the edge fall off. That is the only soft edge available: a genuinely continuous plume needs a per-fragment falloff, which means a shader, and shaders belong to the harness rather than to any one model. Review rounds three and four both reported the puffs as still individually readable, which is a fair description of what this technique can do rather than a defect that more tuning will remove. The port puffs are much fainter than the muzzle ones on purpose: at the muzzle's density they drift between the camera and the receiver and veil the flank, and the ejection port is the thing a reviewer most needs to see into.\n"
         "Each round lays down its own plume and they pile up, which is what a burst looks like. A puff lives 0.26 s, so the last round's has cleared before the cycle repeats; that fade is a concession to looping and not a claim about smoke, which in reality would still be hanging there. Drift is first-order drag to a terminal displacement rather than constant velocity: carried at its jet speed for a whole burst a puff ends up 800 mm downrange and out of frame, where real smoke sheds its momentum in a few tens of milliseconds and then hangs.\n"
