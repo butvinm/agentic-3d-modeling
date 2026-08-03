@@ -3628,7 +3628,7 @@ const Scene SCENE = {
     .description =
         "A three-section five-storey 1-464 panel block -- a khrushchyovka -- with sixty households living in it, taken down by controlled explosion in its own courtyard, in one six-second cycle.\n"
         "\n"
-        "One world unit is one metre. 58.20 m along the block, 11.82 m over the facades, 14.37 m to the top of the parapet.\n"
+        "One world unit is one metre. 58.20 m along the block, 11.82 m over the facades, 14.26 m to the top of the cornice.\n"
         "Origin sits on the ground at the centre of the footprint, +X along the block, +Z out through the main facade.\n"
         "\n"
         "Dimensions, and where they come from.\n"
