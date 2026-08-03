@@ -210,12 +210,20 @@ typedef enum {
     MAT_GLASS, MAT_FRAME, MAT_METAL, MAT_TIMBER,
     MAT_GRASS, MAT_ASPHALT,
     MAT_BARK, MAT_BIRCH, MAT_LEAF, MAT_PAINT, MAT_RUBBER,
+    MAT_FLASH, MAT_DUST,
     MAT_COUNT
 } MatId;
 
-typedef enum { PASS_OPAQUE, PASS_COUNT } Pass;
+typedef enum { PASS_OPAQUE, PASS_GLOW, PASS_DUST, PASS_COUNT } Pass;
 
-static const Pass MAT_PASS[MAT_COUNT] = { 0 };
+// Everything opaque draws first. The detonation flashes draw additively after it, and the dust
+// after them, both with depth writes off: two puffs in line should pile up rather than the nearer
+// one punching a hole in the further, and a cloud between the camera and a flash should veil it
+// rather than the other way round.
+static const Pass MAT_PASS[MAT_COUNT] = {
+    [MAT_FLASH] = PASS_GLOW,
+    [MAT_DUST]  = PASS_DUST,
+};
 
 // Every surface carries a map, so the colour lives in the texels and the material tint stays white; multiplying a coloured map by a coloured tint would darken it twice.
 static const Color MAT_COLOR[MAT_COUNT] = {
@@ -236,11 +244,81 @@ static const Color MAT_COLOR[MAT_COUNT] = {
     // cars are four tints on one mesh rather than four meshes.
     [MAT_PAINT]    = WHITE,
     [MAT_RUBBER]   = WHITE,
+    // The flash takes its colour from the tint, which is also what fades it.
+    [MAT_FLASH]    = { 255, 226, 168, 255 },
+    // The dust keeps a full alpha here and takes it from the per-instance tint instead: DrawModel multiplies the two, and every puff needs its own.
+    [MAT_DUST]     = WHITE,
 };
 
-static const bool MAT_UNLIT[MAT_COUNT] = { 0 };
+static const bool MAT_UNLIT[MAT_COUNT] = { [MAT_FLASH] = true };
+
+// Materials whose silhouette has to fade rather than end: the per-fragment falloff in DUST_FS.
+static const bool MAT_SOFT[MAT_COUNT] = { [MAT_DUST] = true, [MAT_FLASH] = true };
+
+static Shader gDustShader;
 
 static Texture2D MAT_TEX[MAT_COUNT];
+
+// ---------------------------------------------------------------------------
+// Dust shader
+//
+// The technique and the shader are models/humvee.c's, for the same reason it needed them.
+//
+// A puff is a closed blob, and a closed blob has a hard silhouette wherever you put it, however
+// finely it is subdivided. Piling up many faint ones hides that in the middle of a cloud but not
+// at its edge, where a single blob is still a grey pebble with a polygonal rim. The fix is a
+// per-fragment falloff: alpha is scaled by how squarely the surface faces the camera, and a
+// blob's silhouette is exactly where it faces the camera edge-on, so every puff fades out at its
+// own rim and the edge of the cloud is soft rather than pebbled.
+//
+// The blob's normals are radial -- of the sphere the lumps are pushed out from, not of the lumpy
+// surface -- which keeps that falloff monotonic to the silhouette instead of leaving a ring of
+// zero alpha inside it wherever a lump bulges past.
+//
+// The camera position is recovered from matView rather than from a uniform, because the harness
+// feeds viewPos only to its own shader; rmodels.c:1493 uploads matView to any shader that
+// declares it.
+// ---------------------------------------------------------------------------
+
+static const char *DUST_VS =
+    "#version 330\n"
+    "in vec3 vertexPosition;\n"
+    "in vec2 vertexTexCoord;\n"
+    "in vec3 vertexNormal;\n"
+    "uniform mat4 mvp;\n"
+    "uniform mat4 matModel;\n"
+    "uniform mat4 matNormal;\n"
+    "out vec3 fragPosition;\n"
+    "out vec2 fragTexCoord;\n"
+    "out vec3 fragNormal;\n"
+    "void main()\n"
+    "{\n"
+    "    fragPosition = vec3(matModel*vec4(vertexPosition, 1.0));\n"
+    "    fragTexCoord = vertexTexCoord;\n"
+    "    fragNormal = normalize(vec3(matNormal*vec4(vertexNormal, 1.0)));\n"
+    "    gl_Position = mvp*vec4(vertexPosition, 1.0);\n"
+    "}\n";
+
+static const char *DUST_FS =
+    "#version 330\n"
+    "in vec3 fragPosition;\n"
+    "in vec2 fragTexCoord;\n"
+    "in vec3 fragNormal;\n"
+    "uniform sampler2D texture0;\n"
+    "uniform vec4 colDiffuse;\n"
+    "uniform mat4 matView;\n"
+    "out vec4 finalColor;\n"
+    "void main()\n"
+    "{\n"
+    "    vec3 eye = -(transpose(mat3(matView))*vec3(matView[3]));\n"
+    "    vec3 v = normalize(eye - fragPosition);\n"
+    "    vec3 n = normalize(fragNormal);\n"
+    "    float edge = pow(clamp(abs(dot(n, v)), 0.0, 1.0), 1.25);\n"
+    "    float sky = 0.44 + 0.56*(0.5 + 0.5*n.y);\n"
+    "    vec4 texel = texture(texture0, fragTexCoord);\n"
+    "    vec3 col = texel.rgb*colDiffuse.rgb*sky;\n"
+    "    finalColor = vec4(pow(col, vec3(1.0/2.2)), colDiffuse.a*texel.a*edge);\n"
+    "}\n";
 
 // ---------------------------------------------------------------------------
 // Procedurally generated surface maps
@@ -506,6 +584,16 @@ static void MakeTextures(void)
     MAT_TEX[MAT_LEAF]     = MakeLeafTexture();
     MAT_TEX[MAT_PAINT]    = MakeRenderTexture((Color){ 196, 194, 190, 255 }, 137u, 5.0f, 6.0f);
     MAT_TEX[MAT_RUBBER]   = MakeRenderTexture((Color){ 30, 30, 32, 255 }, 149u, 6.0f, 10.0f);
+    // Pulverised concrete: a pale warm grey with a coarse mottle, so a puff has some tooth rather
+    // than reading as an airbrushed ball. Light on purpose -- it is drawn unlit, and this is the
+    // only place its colour is set.
+    MAT_TEX[MAT_DUST]     = MakeRenderTexture((Color){ 156, 148, 136, 255 }, 197u, 30.0f, 22.0f);
+    MAT_TEX[MAT_FLASH]    = MakeRenderTexture((Color){ 242, 232, 208, 255 }, 307u, 8.0f, 10.0f);
+
+    gDustShader = LoadShaderFromMemory(DUST_VS, DUST_FS);
+    if (gDustShader.id == 0) {
+        TraceLog(LOG_WARNING, "panelka: dust shader failed to build, puffs will render as opaque pebbles");
+    }
 }
 
 static void UnloadTextures(void)
@@ -513,6 +601,7 @@ static void UnloadTextures(void)
     for (int m = 0; m < MAT_COUNT; m++) {
         if (MAT_TEX[m].id != 0) UnloadTexture(MAT_TEX[m]);
     }
+    if (gDustShader.id != 0) UnloadShader(gDustShader);
 }
 
 // ---------------------------------------------------------------------------
@@ -530,6 +619,7 @@ typedef struct {
     Model model[MAT_COUNT];
     bool has[MAT_COUNT];
     BoundingBox bounds;      // in the group's own frame, before xform
+    float volume;            // material volume of the meshes, for the rubble pile
     Matrix xform;
     Color tint[MAT_COUNT];
     const Matrix *inst;      // if set, the meshes are drawn once per instance instead of at xform
@@ -577,11 +667,31 @@ static void GroupFinish(Group *g, const char *name)
         g->model[m] = LoadModelFromMesh(mesh);
         g->model[m].materials[0].maps[MATERIAL_MAP_DIFFUSE].color = MAT_COLOR[m];
         if (MAT_TEX[m].id != 0) g->model[m].materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = MAT_TEX[m];
-        if (!MAT_UNLIT[m]) HarnessApplyLighting(&g->model[m]);
+        if (MAT_SOFT[m] && gDustShader.id != 0) g->model[m].materials[0].shader = gDustShader;
+        else if (!MAT_UNLIT[m]) HarnessApplyLighting(&g->model[m]);
         g->has[m] = true;
     }
 
     GroupBoundsFromMesh(g);
+
+    // Signed volume by the divergence theorem, summed over every triangle the group owns.
+    // Everything here is built as a union of closed boxes and capped tubes, and for those this
+    // returns the sum of the individual solids' volumes -- overlaps counted twice, which is a
+    // slight overestimate and the only error worth naming. An open surface would return noise, so
+    // only the building's own types are ever asked.
+    double vol = 0.0;
+    for (int m = 0; m < MAT_COUNT; m++) {
+        const Builder *b = &g->b[m];
+        for (int i = 0; i < b->triangleCount; i++) {
+            const float *v = b->vertices;
+            int a = b->indices[i * 3 + 0], c = b->indices[i * 3 + 1], d = b->indices[i * 3 + 2];
+            Vector3 p0 = { v[a * 3], v[a * 3 + 1], v[a * 3 + 2] };
+            Vector3 p1 = { v[c * 3], v[c * 3 + 1], v[c * 3 + 2] };
+            Vector3 p2 = { v[d * 3], v[d * 3 + 1], v[d * 3 + 2] };
+            vol += Vector3DotProduct(Vector3CrossProduct(p0, p1), p2) / 6.0;
+        }
+    }
+    g->volume = (float)fabs(vol);
 }
 
 static Color TintMul(Color a, Color b)
@@ -629,6 +739,13 @@ static void GroupRegister(Group *g)
 static void DrawGroups(Group *const *gs, int n)
 {
     for (int i = 0; i < n; i++) GroupDrawPass(gs[i], PASS_OPAQUE);
+
+    rlDisableDepthMask();
+    BeginBlendMode(BLEND_ADDITIVE);
+    for (int i = 0; i < n; i++) GroupDrawPass(gs[i], PASS_GLOW);
+    EndBlendMode();
+    for (int i = 0; i < n; i++) GroupDrawPass(gs[i], PASS_DUST);
+    rlEnableDepthMask();
 }
 
 static void GroupUnload(Group *g)
@@ -827,6 +944,7 @@ typedef enum {
     FR_SLAB26, FR_SLAB32, FR_ROOF26, FR_ROOF32,
     FR_XWALL, FR_SPINE26, FR_SPINE32,
     FR_BALC, FR_BALCG, FR_PAR26, FR_PAR32, FR_PAREND, FR_CANOPY, FR_VENT, FR_PIPE, FR_MAST,
+    FR_RUBBLE,
     FR_BIRCH, FR_MAPLE, FR_CARBODY, FR_CARTRIM, FR_BENCH, FR_RUGFRAME, FR_LAMP, FR_BIN,
     FR_COUNT
 } FragType;
@@ -840,7 +958,7 @@ typedef struct {
     float shade;     // per-instance brightness, so 105 copies of one mesh are not 105 identical panels
 } Fragment;
 
-#define MAX_FRAG 1400
+#define MAX_FRAG 1500
 static Fragment gFrag[MAX_FRAG];
 static int gFragCount;
 
@@ -1362,6 +1480,10 @@ static void BuildYardTypes(void)
     }
 
     // A birch is tall, narrow and airy; the broadleaf beside it is shorter and much wider. ref_07 has both, and the birches in it stand well clear of a five-storey block's parapet.
+    // Rubble: a broken slab chunk, flattened rather than round, instanced at half to twice its
+    // built size. It is the material a panel becomes that no panel accounts for.
+    Blob(&gType[FR_RUBBLE].b[MAT_CONCRETE], Vector3Zero(), 0.78f, 0.21f, 0.56f, 0.52f, 631u, 7);
+
     BuildTree(&gType[FR_BIRCH], MAT_BIRCH, 16.5f, 0.200f, 2.55f, 1.45f, 22, 5u);
     BuildTree(&gType[FR_MAPLE], MAT_BARK, 11.5f, 0.290f, 3.60f, 0.86f, 24, 23u);
     BuildCar(&gType[FR_CARBODY], &gType[FR_CARTRIM]);
@@ -1418,6 +1540,20 @@ static void PlaceYard(void)
     Emit(FR_BIN, BayX(2, BAY_STAIR) - 2.6f, 0.0f, -9.9f, 0.0f);
 
     for (int i = 0; i < 4; i++) Emit(FR_LAMP, -36.0f + 24.0f * (float)i, 0.0f, 18.4f, 180.0f);
+}
+
+// Rubble is born inside the volume that is coming down, spread through it rather than over the
+// footprint, so a chunk appears where its parent was and the dust covers its arrival.
+static void PlaceRubble(void)
+{
+    const int N = 170;
+    for (int i = 0; i < N; i++) {
+        float x = (Hash2(i, 41, 4096, 191u) - 0.5f) * BLOCK_LEN * 0.98f;
+        float z = (Hash2(i, 42, 4096, 193u) - 0.5f) * 2.0f * FACE_Z * 0.92f;
+        float y = PLINTH_Y + (ROOF_Y - PLINTH_Y) * Hash2(i, 43, 4096, 197u);
+        EmitAt(FR_RUBBLE, x, y, z, 360.0f * Hash2(i, 44, 4096, 199u),
+               0.50f + 1.35f * Hash2(i, 45, 4096, 211u), WHITE);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1675,22 +1811,461 @@ static void BuildGround(void)
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// The demolition
+//
+// A 1-464 has no frame: every cross wall carries load, which is why the series went up so fast
+// and why it comes down the way it does. Charges are drilled into the cross walls of the bottom
+// two storeys and fired in a sequence running the length of the block, so the building loses its
+// footing progressively rather than all at once and folds instead of toppling. What is above the
+// cut then descends almost vertically and pancakes: slab onto slab, with the facade panels
+// peeling off outwards because nothing holds them to anything once the cross walls behind them
+// are gone.
+//
+// So every fragment does three things and no more. It waits, it flies, and it lands.
+//
+// It waits until the collapse front reaches it. That front has two components: the firing
+// sequence, which runs along X, and the crushing front, which climbs at FRONT_V because each
+// storey has to be destroyed before the one above it can start down.
+//
+// It flies ballistically, tumbling about its own centroid. There is no contact between
+// fragments: a real solver is not what this file is, and at this scale what reads is the timing
+// and the peel rather than any individual collision.
+//
+// It lands on the rubble pile, whose height is not a chosen number. PileY integrates to the
+// summed mesh volume of everything that falls, bulked by BULK_FACTOR, which is what a solid
+// becomes once it is broken.
+// ---------------------------------------------------------------------------
+
+#define T_BLAST      0.90f    // detonation, at phase 0.15 of the cycle
+#define FLASH_END    1.20f    // the flashes are milliseconds in reality; see the note on FlashLevel
+#define SEQ_LEN      0.42f    // the firing sequence takes this long to run the length of the block
+#define FRONT_V      11.0f    // speed the crushing front climbs the building, m/s
+#define GRAV         9.81f
+#define CUT_TOP      (PLINTH_Y + 2.0f * STOREY)   // charges are in the two storeys below this
+#define BULK_FACTOR  1.55f    // how much a cubic metre of concrete swells once it is rubble
+#define PILE_SPREAD  9.0f     // how far past the footprint the pile runs out to nothing
+#define BLAST_V      105.0f   // speed of the air blast that reaches the yard, m/s
+
+static float gPileH = 2.0f;   // solved in SolvePile
+
+static bool IsBuilding(FragType t) { return t < FR_RUBBLE; }
+
+// The rubble pile: a ridge over the footprint running out to nothing PILE_SPREAD past it, highest
+// along the spine and falling towards the gables where there was less above to come down.
+static float PileY(float x, float z)
+{
+    float dx = fmaxf(0.0f, fabsf(x) - BLOCK_LEN * 0.5f);
+    float dz = fmaxf(0.0f, fabsf(z) - FACE_Z);
+    float d = sqrtf(dx * dx + dz * dz);
+    float k = 1.0f - d / PILE_SPREAD;
+    if (k <= 0.0f) return 0.0f;
+    k = k * k * (3.0f - 2.0f * k);
+
+    float ax = fminf(1.0f, fabsf(x) / (BLOCK_LEN * 0.5f));
+    float along = 1.0f - 0.34f * ax * ax * ax;
+    float az = fminf(1.0f, fabsf(z) / FACE_Z);
+    float across = 1.0f - 0.30f * az * az;
+    return gPileH * k * along * across;
+}
+
+// How high the pile has to stand for its shape to hold the material that fell into it.
+// Integrate PileY at unit height over the whole spill region, then scale by the volume.
+static void SolvePile(float material)
+{
+    gPileH = 1.0f;
+    const float STEP = 0.5f;
+    float area = 0.0f;
+    for (float x = -BLOCK_LEN * 0.5f - PILE_SPREAD; x < BLOCK_LEN * 0.5f + PILE_SPREAD; x += STEP) {
+        for (float z = -FACE_Z - PILE_SPREAD; z < FACE_Z + PILE_SPREAD; z += STEP) {
+            area += PileY(x + STEP * 0.5f, z + STEP * 0.5f) * STEP * STEP;
+        }
+    }
+    gPileH = (area > 1e-3f) ? material * BULK_FACTOR / area : 2.0f;
+    TraceLog(LOG_INFO, "panelka: %.0f m3 of material bulks to %.0f and piles %.2f m deep at the crest",
+             material, material * BULK_FACTOR, gPileH);
+}
+
+typedef struct {
+    float t0;        // when it lets go
+    float t1;        // when it lands
+    Vector3 v0;
+    Vector3 axis;    // tumble axis, in the fragment's own frame
+    float omega;
+    Vector3 c;       // local centroid, which is what it tumbles about
+    float half;      // half its own height, so it comes to rest on the pile rather than through it
+} Motion;
+
+static Motion gMotion[MAX_FRAG];
+
+static float Rand01(int i, int k) { return Hash2(i, k, 4096, 977u); }
+static float Rand11(int i, int k) { return Rand01(i, k) * 2.0f - 1.0f; }
+
+static void PlanFragment(int i)
+{
+    Fragment *f = &gFrag[i];
+    Motion *m = &gMotion[i];
+    BoundingBox b = gType[f->type].bounds;
+    m->c = (Vector3){ (b.min.x + b.max.x) * 0.5f, (b.min.y + b.max.y) * 0.5f, (b.min.z + b.max.z) * 0.5f };
+    m->half = (b.max.y - b.min.y) * 0.5f * f->scale;
+
+    Vector3 wc = Vector3Transform(m->c, FragRest(f));
+    float height = fmaxf(0.0f, wc.y - PLINTH_Y);
+
+    // The firing sequence runs from the left-hand gable, and the crushing front climbs from the cut.
+    float seq = SEQ_LEN * (wc.x + BLOCK_LEN * 0.5f) / BLOCK_LEN;
+    float climb = fmaxf(0.0f, wc.y - CUT_TOP) / FRONT_V;
+    m->t0 = T_BLAST + seq + climb + 0.09f * Rand01(i, 1);
+
+    // Outward is away from the spine, which is the direction a facade panel peels.
+    float sz = (wc.z >= 0.0f) ? 1.0f : -1.0f;
+    float out = 0.0f, up = 0.0f, along = 0.6f * Rand11(i, 2);
+
+    bool skin = (f->type <= FR_PEND) || (f->type >= FR_G26 && f->type <= FR_GDOOR) || f->type == FR_PIPE;
+    bool glazed = (f->type >= FR_G26 && f->type <= FR_GDOOR);
+    bool balcony = (f->type == FR_BALC || f->type == FR_BALCG);
+
+    if (wc.y < CUT_TOP) {
+        // The charges are in here. This is the only material that is thrown rather than dropped.
+        m->t0 = T_BLAST + seq + 0.05f * Rand01(i, 3);
+        out = 3.0f + 3.2f * Rand01(i, 4);
+        up = 1.1f + 1.9f * Rand01(i, 5);
+    } else if (glazed) {
+        // Every window in the building goes at the shock, not when its own storey is reached.
+        m->t0 = T_BLAST + seq + 0.05f * Rand01(i, 6);
+        out = 3.6f + 4.2f * Rand01(i, 7);
+        up = 0.4f + 1.2f * Rand01(i, 8);
+    } else if (balcony) {
+        // A cantilever with nothing above it, so it goes before the wall it hangs on.
+        m->t0 -= 0.22f;
+        out = 1.1f + 0.10f * height + 0.8f * Rand01(i, 9);
+    } else if (skin) {
+        out = 0.35f + 0.105f * height + 0.7f * Rand01(i, 10);
+    } else if (f->type == FR_RUBBLE) {
+        m->t0 = T_BLAST + seq + climb * 0.75f + 0.35f * Rand01(i, 18);
+        out = 1.3f + 3.4f * Rand01(i, 19);
+        up = 0.4f + 2.6f * Rand01(i, 20);
+        along = 2.6f * Rand11(i, 21);
+    } else {
+        // Slabs, cross walls and the spine drop; they are what the pile is made of.
+        out = 0.25f * Rand01(i, 11);
+        up = -0.3f * Rand01(i, 12);
+    }
+
+    m->v0 = (Vector3){ along, up, sz * out };
+    m->axis = Vector3Normalize((Vector3){ Rand11(i, 13) + 0.05f, Rand11(i, 14) * 0.4f, Rand11(i, 15) });
+    m->omega = (glazed ? 3.4f : balcony ? 1.9f : 0.7f) * (0.5f + Rand01(i, 16)) * (Rand01(i, 17) < 0.5f ? -1.0f : 1.0f);
+    if (f->type == FR_RUBBLE) m->omega *= 4.0f;
+
+    m->t0 = fmaxf(m->t0, T_BLAST + seq);
+
+    // Where it comes down. The landing point depends on the flight time and the flight time on the
+    // landing point, so solve it twice; two passes move the answer by centimetres on the third.
+    float tau = 0.6f;
+    for (int pass = 0; pass < 3; pass++) {
+        float lx = wc.x + m->v0.x * tau;
+        float lz = wc.z + m->v0.z * tau;
+        float target = PileY(lx, lz) + m->half;
+        float disc = m->v0.y * m->v0.y + 2.0f * GRAV * (wc.y - target);
+        tau = (disc <= 0.0f) ? 0.0f : (m->v0.y + sqrtf(disc)) / GRAV;
+    }
+    m->t1 = m->t0 + tau;
+}
+
+
+// ---------------------------------------------------------------------------
+// Dust and flashes
+//
+// Two things make dust in a demolition and they behave differently. The base surge is air driven
+// out sideways by the floors slamming down on it: it leaves the footprint fast and low and rolls
+// outwards along the ground. The column is what rises off the pile afterwards, slower and much
+// taller. One population averaging the two reads as ground fog, so there are two.
+//
+// A puff is thrown, then sheds its speed to the air as a first-order decay to a terminal
+// displacement, which is why dust travels so much further than a thrown solid does and then
+// simply hangs. It grows the whole time, and fades to nothing inside its own life.
+// ---------------------------------------------------------------------------
+
+#define DUST_MAX     1240
+#define DUST_TAU     0.62f    // time constant of the speed decay
+
+typedef struct {
+    Vector3 p0, v;
+    float t0, life, r0, r1, peak, yaw, rise;
+} Puff;
+
+static Group gDust, gFlash;
+static Puff gPuff[DUST_MAX];
+static Matrix gDustMat[DUST_MAX];
+static Color gDustTint[DUST_MAX];
+static int gPuffCount;
+
+#define FLASH_MAX 96
+static Vector3 gFlashPos[FLASH_MAX];
+static Matrix gFlashMat[FLASH_MAX];
+static Color gFlashTint[FLASH_MAX];
+static int gFlashCount;
+
+static void BuildDustTypes(void)
+{
+    // One lumpy blob of unit radius, drawn per puff with a scale, a yaw and a translation. It is
+    // only yawed: a puff is shaded by a hemisphere ramp off its own normal, and tumbling it would
+    // light some undersides from above.
+    Blob(&gDust.b[MAT_DUST], Vector3Zero(), 1.0f, 0.88f, 1.0f, 0.34f, 401u, 9);
+    // A flash is a billboardless glow ball; at the sizes and durations here nothing ever gets
+    // close enough to it for the difference to show.
+    Blob(&gFlash.b[MAT_FLASH], Vector3Zero(), 1.0f, 1.0f, 1.0f, 0.10f, 77u, 7);
+}
+
+static void AddPuff(Vector3 p, Vector3 v, float t0, float life, float r0, float r1, float peak, float rise, int seed)
+{
+    if (gPuffCount >= DUST_MAX) return;
+    Puff *q = &gPuff[gPuffCount++];
+    q->p0 = p; q->v = v; q->t0 = t0; q->life = life;
+    q->r0 = r0; q->r1 = r1; q->peak = peak; q->rise = rise;
+    q->yaw = 360.0f * Hash2(seed, 5, 4096, 811u);
+}
+
+static void PlaceDust(void)
+{
+    const int SURGE = 620, COLUMN = 380;
+
+    for (int i = 0; i < SURGE; i++) {
+        // Born on the footprint's perimeter, as the firing sequence reaches that x.
+        float u = Hash2(i, 1, 4096, 71u);
+        float x = (u - 0.5f) * BLOCK_LEN;
+        float sz = (Hash2(i, 2, 4096, 73u) < 0.5f) ? 1.0f : -1.0f;
+        float z = sz * (FACE_Z * (0.35f + 0.65f * Hash2(i, 3, 4096, 79u)));
+        float y = 0.25f + 2.4f * Hash2(i, 4, 4096, 83u);
+
+        float seq = SEQ_LEN * (x + BLOCK_LEN * 0.5f) / BLOCK_LEN;
+        float t0 = T_BLAST + seq + 0.18f + 1.70f * powf(Hash2(i, 5, 4096, 89u), 1.6f);
+
+        float speed = 9.0f + 13.0f * Hash2(i, 6, 4096, 97u);
+        Vector3 v = { (Hash2(i, 7, 4096, 101u) - 0.5f) * 7.0f, 0.8f + 2.2f * Hash2(i, 8, 4096, 103u), sz * speed };
+        float r0 = 2.0f + 2.4f * Hash2(i, 9, 4096, 107u);
+        AddPuff((Vector3){ x, y, z }, v, t0, 2.6f + 1.9f * Hash2(i, 10, 4096, 109u),
+                r0, r0 * (3.4f + 2.0f * Hash2(i, 11, 4096, 113u)),
+                0.16f + 0.11f * Hash2(i, 12, 4096, 127u), 0.55f, i);
+    }
+
+    for (int i = 0; i < COLUMN; i++) {
+        float u = Hash2(i, 21, 4096, 131u);
+        float x = (u - 0.5f) * BLOCK_LEN * 0.94f;
+        float z = (Hash2(i, 22, 4096, 137u) - 0.5f) * 2.0f * FACE_Z;
+        float y = 0.8f + 5.0f * Hash2(i, 23, 4096, 139u);
+
+        float seq = SEQ_LEN * (x + BLOCK_LEN * 0.5f) / BLOCK_LEN;
+        float t0 = T_BLAST + seq + 0.55f + 2.4f * Hash2(i, 24, 4096, 149u);
+
+        Vector3 v = { (Hash2(i, 25, 4096, 151u) - 0.5f) * 4.0f,
+                      3.4f + 5.2f * Hash2(i, 26, 4096, 157u),
+                      (Hash2(i, 27, 4096, 163u) - 0.5f) * 5.0f };
+        float r0 = 2.8f + 3.2f * Hash2(i, 28, 4096, 167u);
+        AddPuff((Vector3){ x, y, z }, v, t0, 2.4f + 1.6f * Hash2(i, 29, 4096, 173u),
+                r0, r0 * (2.6f + 1.6f * Hash2(i, 30, 4096, 179u)),
+                0.12f + 0.10f * Hash2(i, 31, 4096, 181u), 1.15f, i + SURGE);
+    }
+
+    for (int i = 0; i < 190; i++) {
+        float x = (Hash2(i, 51, 4096, 223u) - 0.5f) * BLOCK_LEN;
+        float sz = (Hash2(i, 52, 4096, 227u) < 0.5f) ? 1.0f : -1.0f;
+        float fl = (Hash2(i, 53, 4096, 229u) < 0.5f) ? 0.0f : 1.0f;
+        float y = FloorY((int)fl) + 0.4f + 1.4f * Hash2(i, 54, 4096, 233u);
+        float seq = SEQ_LEN * (x + BLOCK_LEN * 0.5f) / BLOCK_LEN;
+        Vector3 v = { (Hash2(i, 55, 4096, 239u) - 0.5f) * 5.0f,
+                      0.5f + 2.0f * Hash2(i, 56, 4096, 241u),
+                      sz * (15.0f + 9.0f * Hash2(i, 57, 4096, 251u)) };
+        float r0 = 0.60f + 0.7f * Hash2(i, 58, 4096, 257u);
+        AddPuff((Vector3){ x, y, sz * (FACE_Z + 0.2f) }, v, T_BLAST + seq + 0.04f * Hash2(i, 59, 4096, 263u),
+                1.1f + 0.7f * Hash2(i, 60, 4096, 269u), r0, r0 * 5.5f,
+                0.20f + 0.12f * Hash2(i, 61, 4096, 271u), 0.30f, i + 900);
+    }
+
+    // A flash at every cross wall the charges are drilled into, on both facades, on the two cut
+    // storeys. That is where the holes are and it is the only place the light comes from.
+    for (int s = 0; s < SECTIONS && gFlashCount < FLASH_MAX; s++) {
+        for (int b = 0; b <= BAYS; b += 2) {
+            if (b == BAYS && s != SECTIONS - 1) continue;
+            float x = SectionX(s) - SECTION_LEN * 0.5f;
+            for (int k = 0; k < b; k++) x += BAY_W[k];
+            for (int side = 0; side < 2 && gFlashCount < FLASH_MAX; side++) {
+                for (int fl = 0; fl < 2 && gFlashCount < FLASH_MAX; fl++) {
+                    gFlashPos[gFlashCount++] = (Vector3){
+                        x, FloorY(fl) + 1.1f, (side == 0) ? FACE_Z + 0.35f : -FACE_Z - 0.35f };
+                }
+            }
+        }
+    }
+}
+
+// A charge is milliseconds of light and --anim samples the cycle at N evenly spaced phases, so a
+// truthful flash would be caught only by luck. It is held over 0.30 s of a 6 s cycle instead --
+// a playback concession, not a claim about explosives -- which puts the window at 0.90 to 1.20
+// and so straddles t = 1.0. Every --frames that is a multiple of 6 lands a frame inside it.
+static float FlashLevel(float t)
+{
+    if (t < T_BLAST || t > FLASH_END) return 0.0f;
+    float u = (t - T_BLAST) / (FLASH_END - T_BLAST);
+    return powf(1.0f - u, 2.2f);
+}
+
+static void PoseDust(float t)
+{
+    for (int i = 0; i < gPuffCount; i++) {
+        Puff *q = &gPuff[i];
+        float age = t - q->t0;
+        if (age <= 0.0f || age >= q->life) { gDustTint[i] = (Color){ 0, 0, 0, 0 }; continue; }
+        float u = age / q->life;
+
+        float k = DUST_TAU * (1.0f - expf(-age / DUST_TAU));
+        Vector3 p = {
+            q->p0.x + q->v.x * k,
+            q->p0.y + q->v.y * k + q->rise * age,
+            q->p0.z + q->v.z * k,
+        };
+        float r = q->r0 + (q->r1 - q->r0) * powf(u, 0.70f);
+
+        // In fast, out slowly, and to nothing by the end of its own life, which is a concession
+        // to the cycle rather than a claim about dust.
+        float a = q->peak * fminf(1.0f, u / 0.12f) * fminf(1.0f, (1.0f - u) / 0.55f);
+
+        gDustMat[i] = MatrixMultiply(MatrixMultiply(MatrixScale(r, r, r), MatrixRotateY(q->yaw * DEG2RAD)),
+                                     MatrixTranslate(p.x, p.y, p.z));
+        gDustTint[i] = (Color){ 255, 255, 255, (unsigned char)Clamp(a * 255.0f, 0.0f, 255.0f) };
+    }
+
+    float lvl = FlashLevel(t);
+    for (int i = 0; i < gFlashCount; i++) {
+        float r = 1.5f + 2.6f * lvl;
+        Vector3 p = gFlashPos[i];
+        gFlashMat[i] = MatrixMultiply(MatrixScale(r, r, r), MatrixTranslate(p.x, p.y, p.z));
+        gFlashTint[i] = (Color){ 255, 255, 255, (unsigned char)Clamp(lvl * 255.0f, 0.0f, 255.0f) };
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Pose
 // ---------------------------------------------------------------------------
 
-#define CYCLE 8.0f
+#define CYCLE 6.0f
+
+// A fragment in flight: ballistic about its own centroid, frozen the moment it lands.
+static Matrix FlightPose(int i, float t)
+{
+    const Fragment *f = &gFrag[i];
+    const Motion *m = &gMotion[i];
+    float tau = fminf(t, m->t1) - m->t0;
+    if (tau <= 0.0f) return FragRest(f);
+
+    Vector3 d = { m->v0.x * tau, m->v0.y * tau - 0.5f * GRAV * tau * tau, m->v0.z * tau };
+    Vector3 sc = Vector3Scale(m->c, f->scale);
+
+    // Scale, then swing about the fragment's own centroid, then take the rest yaw, then place.
+    // Rotating about the local origin instead would spin a facade panel about its bottom inner
+    // corner, which is a hinge no broken panel has.
+    Matrix M = MatrixScale(f->scale, f->scale, f->scale);
+    M = MatrixMultiply(M, MatrixTranslate(-sc.x, -sc.y, -sc.z));
+    M = MatrixMultiply(M, MatrixRotate(m->axis, m->omega * tau));
+    M = MatrixMultiply(M, MatrixTranslate(sc.x, sc.y, sc.z));
+    M = MatrixMultiply(M, MatrixRotateY(f->yaw * DEG2RAD));
+    return MatrixMultiply(M, MatrixTranslate(f->pos.x + d.x, f->pos.y + d.y, f->pos.z + d.z));
+}
+
+// When the air blast reaches a point in the yard. It leaves the building at the moment the
+// charges fire and travels at BLAST_V, which puts it at the far trees about a third of a second
+// later -- slow enough that the lashing runs outwards across the scene rather than happening to
+// everything at once.
+static float BlastArrival(float x, float z)
+{
+    float dz = fmaxf(0.0f, fabsf(z) - FACE_Z);
+    float dx = fmaxf(0.0f, fabsf(x) - BLOCK_LEN * 0.5f);
+    return T_BLAST + sqrtf(dx * dx + dz * dz) / BLAST_V;
+}
+
+// A damped oscillation starting when the blast arrives. One expression covers a tree bending, a
+// car rocking on its springs and a bench going over, because all three are the same statement:
+// something with a restoring force gets hit once.
+static float Lash(float t, float arrive, float amp, float hz, float decay)
+{
+    float a = t - arrive;
+    if (a <= 0.0f) return 0.0f;
+    return amp * expf(-a * decay) * sinf(2.0f * PI * hz * a);
+}
+
+// The yard. Nothing out here is destroyed, but nothing out here is untouched either: what a
+// demolition looks like from across the road is mostly the trees going over.
+static Matrix YardPose(int i, float t)
+{
+    const Fragment *f = &gFrag[i];
+    float arrive = BlastArrival(f->pos.x, f->pos.z);
+    // Distance from the block, which is what everything out here scales by.
+    float dz = fmaxf(0.0f, fabsf(f->pos.z) - FACE_Z);
+    float dx = fmaxf(0.0f, fabsf(f->pos.x) - BLOCK_LEN * 0.5f);
+    float dist = fmaxf(1.0f, sqrtf(dx * dx + dz * dz));
+    float near = 1.0f / (1.0f + dist / 16.0f);
+
+    // Away from the building, in the plane; the axis to tilt about is perpendicular to it.
+    Vector3 out = Vector3Normalize((Vector3){ (fabsf(f->pos.x) > BLOCK_LEN * 0.5f) ? f->pos.x : 0.0f,
+                                              0.0f, f->pos.z });
+    Vector3 axis = { -out.z, 0.0f, out.x };
+
+    float tilt = 0.0f, lift = 0.0f;
+    switch (f->type) {
+        case FR_BIRCH: case FR_MAPLE:
+            // A rigid mesh can only hinge at the root, so the whole tree leans where a real one
+            // would bend most at the top. Skinning is not available here (the harness's shader
+            // declares no bone attributes), so this is the honest limit rather than a choice.
+            tilt = Lash(t, arrive, 0.30f * near, 0.62f, 1.05f);
+            break;
+        case FR_CARBODY: case FR_CARTRIM:
+            tilt = Lash(t, arrive, 0.075f * near, 1.65f, 2.6f);
+            lift = -0.030f * fabsf(tilt) * 10.0f;
+            break;
+        case FR_BENCH: case FR_BIN: {
+            // Close enough to the facade to be knocked flat and then buried.
+            float a = t - arrive;
+            float over = (a <= 0.0f) ? 0.0f : fminf(1.0f, a / 0.55f);
+            tilt = 1.35f * near * over * over * (3.0f - 2.0f * over) + Lash(t, arrive, 0.10f, 3.0f, 5.0f);
+            break;
+        }
+        default:
+            tilt = Lash(t, arrive, 0.055f * near, 2.4f, 2.2f);
+            break;
+    }
+
+    if (fabsf(tilt) < 1e-5f && fabsf(lift) < 1e-5f) return FragRest(f);
+
+    Matrix M = MatrixScale(f->scale, f->scale, f->scale);
+    M = MatrixMultiply(M, MatrixRotateY(f->yaw * DEG2RAD));
+    M = MatrixMultiply(M, MatrixRotate(axis, tilt));
+    return MatrixMultiply(M, MatrixTranslate(f->pos.x, f->pos.y + lift, f->pos.z));
+}
 
 static void Update(float t)
 {
-    (void)t;
     for (int i = 0; i < gFragCount; i++) {
-        gFragMat[i] = FragRest(&gFrag[i]);
+        Fragment *f = &gFrag[i];
         // +-8 either side of white. Enough to separate two neighbouring panels, not enough to read as a repainted one.
-        int k = (int)(230.0f + 25.0f * gFrag[i].shade);
-        gFragTint[i] = TintMul((Color){ (unsigned char)k, (unsigned char)k, (unsigned char)k, 255 },
-                               gFrag[i].tint);
+        int k = (int)(230.0f + 25.0f * f->shade);
+        Color tint = TintMul((Color){ (unsigned char)k, (unsigned char)k, (unsigned char)k, 255 }, f->tint);
+
+        if (f->type == FR_RUBBLE) {
+            // Rubble is material that did not exist as a separate thing until the building broke,
+            // so it has no rest pose: it is invisible until its own moment and is born inside the
+            // collapsing volume, where the dust covers its arrival.
+            gFragTint[i] = (t < gMotion[i].t0) ? (Color){ 0, 0, 0, 0 } : tint;
+            gFragMat[i] = FlightPose(i, t);
+        } else if (IsBuilding(f->type)) {
+            gFragTint[i] = tint;
+            gFragMat[i] = (t <= gMotion[i].t0) ? FragRest(f) : FlightPose(i, t);
+        } else {
+            gFragTint[i] = tint;
+            gFragMat[i] = YardPose(i, t);
+        }
     }
+    PoseDust(t);
 }
 
 // ---------------------------------------------------------------------------
@@ -1713,9 +2288,11 @@ static Group *PART_PLINTH[] = { &gPlinth };
 static Group *PART_TREES[]  = { &gType[FR_BIRCH], &gType[FR_MAPLE] };
 static Group *PART_CARS[]   = { &gType[FR_CARBODY], &gType[FR_CARTRIM] };
 static Group *PART_YARD[]   = { &gType[FR_BENCH], &gType[FR_RUGFRAME], &gType[FR_LAMP], &gType[FR_BIN] };
+static Group *PART_DEBRIS[] = { &gType[FR_RUBBLE] };
+static Group *PART_DUST[]   = { &gDust, &gFlash };
 static Group *PART_GROUND[] = { &gGround };
 
-static BoundingBox bShell, bGlaz, bStruct, bRoof, bBalc, bEntry, bPlinth, bGround, bTrees, bCars, bYard;
+static BoundingBox bShell, bGlaz, bStruct, bRoof, bBalc, bEntry, bPlinth, bGround, bTrees, bCars, bYard, bDebris, bDust;
 
 static void DrawAll(void) { DrawGroups(gAll, gAllCount); }
 static void DrawShell(void) { DrawGroups(PART_SHELL, COUNT_OF(PART_SHELL)); }
@@ -1729,6 +2306,8 @@ static void DrawGround(void) { DrawGroups(PART_GROUND, COUNT_OF(PART_GROUND)); }
 static void DrawTrees(void) { DrawGroups(PART_TREES, COUNT_OF(PART_TREES)); }
 static void DrawCars(void) { DrawGroups(PART_CARS, COUNT_OF(PART_CARS)); }
 static void DrawYard(void) { DrawGroups(PART_YARD, COUNT_OF(PART_YARD)); }
+static void DrawDebris(void) { DrawGroups(PART_DEBRIS, COUNT_OF(PART_DEBRIS)); }
+static void DrawDust(void) { DrawGroups(PART_DUST, COUNT_OF(PART_DUST)); }
 
 static BoundingBox ShellBounds(void) { return bShell; }
 static BoundingBox GlazBounds(void) { return bGlaz; }
@@ -1741,6 +2320,8 @@ static BoundingBox GroundBounds(void) { return bGround; }
 static BoundingBox TreeBounds(void) { return bTrees; }
 static BoundingBox CarBounds(void) { return bCars; }
 static BoundingBox YardBounds(void) { return bYard; }
+static BoundingBox DebrisBounds(void) { return bDebris; }
+static BoundingBox DustBounds(void) { return bDust; }
 
 static const Part PARTS[] = {
     { .name = "shell", .draw = DrawShell, .bounds = ShellBounds },
@@ -1754,19 +2335,28 @@ static const Part PARTS[] = {
     { .name = "trees", .draw = DrawTrees, .bounds = TreeBounds },
     { .name = "cars", .draw = DrawCars, .bounds = CarBounds },
     { .name = "yard", .draw = DrawYard, .bounds = YardBounds },
+    { .name = "debris", .draw = DrawDebris, .bounds = DebrisBounds },
+    { .name = "dust", .draw = DrawDust, .bounds = DustBounds },
 };
 
-// A group that exists in several hundred places has no single bounding box either. Sample the pose over the cycle and union the eight transformed corners of the local box over every instance, which is the same argument SweepBounds makes for a part that moves: GetModelBoundingBox transforms only the box's own two corners and warns that it does not support rotation (vendor/raylib/src/rmodels.c:1243), which is exactly what a yawed panel is.
-static BoundingBox InstBounds(Group *const *gs, int n)
+// A group that exists in several hundred places has no single bounding box either. Union the eight transformed corners of the local box over every instance, which is the same argument SweepBounds makes for a part that moves: GetModelBoundingBox transforms only the box's own two corners and warns that it does not support rotation (vendor/raylib/src/rmodels.c:1243), which is exactly what a yawed panel is.
+//
+// Whether to sweep the cycle as well is a different question here than in a model whose parts
+// merely move. Sweeping a part of this one gives the whole debris field, which frames every
+// building part identically and destroys exactly what --part exists for. So the building's parts
+// are framed on their rest pose, which is the pose --part renders and the one you inspect
+// geometry in; only the debris and the dust, which have no rest pose worth framing, are swept.
+static BoundingBox InstBounds(Group *const *gs, int n, bool swept)
 {
     BoundingBox out = { { 1e9f, 1e9f, 1e9f }, { -1e9f, -1e9f, -1e9f } };
-    const int SAMPLES = 24;
+    const int SAMPLES = swept ? 40 : 1;
     for (int s = 0; s < SAMPLES; s++) {
-        Update(CYCLE * (float)s / (float)SAMPLES);
+        Update(swept ? CYCLE * (float)s / (float)SAMPLES : 0.0f);
         for (int i = 0; i < n; i++) {
             BoundingBox b = gs[i]->bounds;
             int reps = (gs[i]->instCount > 0) ? gs[i]->instCount : 1;
             for (int k = 0; k < reps; k++) {
+                if (gs[i]->instTint && gs[i]->instTint[k].a == 0) continue;
                 Matrix m = (gs[i]->instCount > 0) ? gs[i]->inst[k] : gs[i]->xform;
                 for (int c = 0; c < 8; c++) {
                     Vector3 p = {
@@ -1913,6 +2503,76 @@ static void CheckNothingBuried(void)
     }
 }
 
+
+// The collapse itself: when the last piece lands, how far the furthest one is thrown, and whether
+// anything is still in the air when the cycle ends.
+static void CheckCollapse(void)
+{
+    float last = 0.0f, throwOut = 0.0f, deepest = 1e9f;
+    int airborne = 0, entombed = 0;
+    for (int i = 0; i < gFragCount; i++) {
+        if (!IsBuilding(gFrag[i].type) && gFrag[i].type != FR_RUBBLE) continue;
+        const Motion *m = &gMotion[i];
+        last = fmaxf(last, m->t1);
+        if (m->t1 > CYCLE) airborne++;
+
+        Matrix land = FlightPose(i, m->t1);
+        Vector3 c = Vector3Transform(m->c, land);
+        float outward = fmaxf(fabsf(c.z) - FACE_Z, fabsf(c.x) - BLOCK_LEN * 0.5f);
+        throwOut = fmaxf(throwOut, outward);
+        // Anything that was already under the finished crest before it fell had nowhere to go:
+        // the bottom of the building is the bottom of the pile, and that is not a solver failure.
+        Vector3 r = Vector3Transform(m->c, FragRest(&gFrag[i]));
+        if (r.y - m->half < PileY(r.x, r.z)) { entombed++; continue; }
+        deepest = fminf(deepest, c.y - m->half - PileY(c.x, c.z));
+    }
+    TraceLog(LOG_INFO, "panelka: last piece lands at %.2f s of a %.1f s cycle, thrown up to %.1f m clear of the footprint; %d fragments began under the finished crest and stay there",
+             last, CYCLE, throwOut, entombed);
+    if (airborne > 0) {
+        TraceLog(LOG_WARNING, "panelka: %d fragments are still in the air when the cycle ends", airborne);
+    }
+    // Everything must come to rest on the pile, not inside it. The tumble is about the centroid,
+    // so a piece can still bury a corner; what is checked is that its centre lands on the surface.
+    if (deepest < -0.02f) {
+        TraceLog(LOG_WARNING, "panelka: a fragment settles %.3f m under the pile surface", -deepest);
+    }
+}
+
+// A demolition is not periodic, and this is the one model here whose loop deliberately does not
+// close. Rather than pretend, measure the seam: the largest distance any fragment has moved
+// between the start of the cycle and its end. That number is the size of the jump a viewer sees
+// if the sequence is played round, and it is meant to be large.
+static void CheckLoopSeam(void)
+{
+    Update(0.0f);
+    static Vector3 at0[MAX_FRAG];
+    for (int i = 0; i < gFragCount; i++) at0[i] = Vector3Transform(gMotion[i].c, gFragMat[i]);
+
+    Update(CYCLE);
+    float worst = 0.0f;
+    for (int i = 0; i < gFragCount; i++) {
+        Vector3 p = Vector3Transform(gMotion[i].c, gFragMat[i]);
+        worst = fmaxf(worst, Vector3Distance(p, at0[i]));
+    }
+    Update(0.0f);
+    TraceLog(LOG_INFO, "panelka: the loop does not close, by %.1f m at the worst fragment; a demolition is a one-shot event and --anim plays it once", worst);
+}
+
+// The flash is the shortest event in the cycle, so say how many frames of a given --frames land
+// inside it rather than hoping one does.
+static void CheckFlashSampling(void)
+{
+    for (int frames = 6; frames <= 30; frames += 6) {
+        int hits = 0;
+        for (int i = 0; i < frames; i++) {
+            if (FlashLevel(CYCLE * (float)i / (float)frames) > 0.0f) hits++;
+        }
+        if (hits == 0) TraceLog(LOG_WARNING, "panelka: --frames %d never samples the detonation", frames);
+    }
+    TraceLog(LOG_INFO, "panelka: detonation held over %.2f s of a %.1f s cycle, %d puffs, %d flashes",
+             FLASH_END - T_BLAST, CYCLE, gPuffCount, gFlashCount);
+}
+
 // ---------------------------------------------------------------------------
 // Scene
 // ---------------------------------------------------------------------------
@@ -1923,6 +2583,7 @@ static const char *TYPE_NAME[FR_COUNT] = {
     "slab26", "slab32", "roof26", "roof32",
     "xwall", "spine26", "spine32",
     "balc", "balcg", "par26", "par32", "parend", "canopy", "vent", "pipe", "mast",
+    "rubble",
     "birch", "maple", "carbody", "cartrim", "bench", "rugframe", "lamp", "bin",
 };
 
@@ -1955,10 +2616,19 @@ static void Init(void)
     BuildFacadeTypes();
     BuildStructureTypes();
     BuildYardTypes();
+    BuildDustTypes();
     for (int t = 0; t < FR_COUNT; t++) {
         GroupFinish(&gType[t], TYPE_NAME[t]);
         GroupRegister(&gType[t]);
     }
+    GroupFinish(&gDust, "dust");
+    gDust.inst = gDustMat;
+    gDust.instTint = gDustTint;
+    GroupRegister(&gDust);
+    GroupFinish(&gFlash, "flash");
+    gFlash.inst = gFlashMat;
+    gFlash.instTint = gFlashTint;
+    GroupRegister(&gFlash);
 
     BuildPlinth();
     GroupFinish(&gPlinth, "plinth");
@@ -1970,20 +2640,38 @@ static void Init(void)
 
     PlaceBuilding();
     PlaceYard();
+    PlaceRubble();
     SortFragments();
+    PlaceDust();
+    gDust.instCount = gPuffCount;
+    gFlash.instCount = gFlashCount;
+
+    // How high the pile stands is the summed mesh volume of everything that falls, bulked, and
+    // fitted to the pile's own shape. Nothing about it is chosen.
+    float material = 0.0f;
+    for (int i = 0; i < gFragCount; i++) {
+        if (!IsBuilding(gFrag[i].type) && gFrag[i].type != FR_RUBBLE) continue;
+        float sc = gFrag[i].scale;
+        material += gType[gFrag[i].type].volume * sc * sc * sc;
+    }
+    SolvePile(material);
+    for (int i = 0; i < gFragCount; i++) PlanFragment(i);
+
     Update(0.0f);
 
-    bShell = InstBounds(PART_SHELL, COUNT_OF(PART_SHELL));
-    bGlaz = InstBounds(PART_GLAZ, COUNT_OF(PART_GLAZ));
-    bStruct = InstBounds(PART_STRUCT, COUNT_OF(PART_STRUCT));
-    bRoof = InstBounds(PART_ROOF, COUNT_OF(PART_ROOF));
-    bBalc = InstBounds(PART_BALC, COUNT_OF(PART_BALC));
-    bEntry = InstBounds(PART_ENTRY, COUNT_OF(PART_ENTRY));
-    bPlinth = InstBounds(PART_PLINTH, COUNT_OF(PART_PLINTH));
-    bGround = InstBounds(PART_GROUND, COUNT_OF(PART_GROUND));
-    bTrees = InstBounds(PART_TREES, COUNT_OF(PART_TREES));
-    bCars = InstBounds(PART_CARS, COUNT_OF(PART_CARS));
-    bYard = InstBounds(PART_YARD, COUNT_OF(PART_YARD));
+    bShell = InstBounds(PART_SHELL, COUNT_OF(PART_SHELL), false);
+    bGlaz = InstBounds(PART_GLAZ, COUNT_OF(PART_GLAZ), false);
+    bStruct = InstBounds(PART_STRUCT, COUNT_OF(PART_STRUCT), false);
+    bRoof = InstBounds(PART_ROOF, COUNT_OF(PART_ROOF), false);
+    bBalc = InstBounds(PART_BALC, COUNT_OF(PART_BALC), false);
+    bEntry = InstBounds(PART_ENTRY, COUNT_OF(PART_ENTRY), false);
+    bPlinth = InstBounds(PART_PLINTH, COUNT_OF(PART_PLINTH), false);
+    bGround = InstBounds(PART_GROUND, COUNT_OF(PART_GROUND), false);
+    bTrees = InstBounds(PART_TREES, COUNT_OF(PART_TREES), false);
+    bCars = InstBounds(PART_CARS, COUNT_OF(PART_CARS), false);
+    bYard = InstBounds(PART_YARD, COUNT_OF(PART_YARD), false);
+    bDebris = InstBounds(PART_DEBRIS, COUNT_OF(PART_DEBRIS), true);
+    bDust = InstBounds(PART_DUST, COUNT_OF(PART_DUST), true);
 
     CheckBaysTile();
     CheckPanels();
@@ -1991,6 +2679,9 @@ static void Init(void)
     CheckBalconyRoot();
     CheckStructureMeets();
     CheckNothingBuried();
+    CheckCollapse();
+    CheckFlashSampling();
+    CheckLoopSeam();
 }
 
 static void Unload(void)
@@ -2003,8 +2694,7 @@ static void Unload(void)
 const Scene SCENE = {
     .name = "panelka",
     .description =
-        "A three-section five-storey 1-464 panel block -- a khrushchyovka -- standing in its own courtyard.\n"
-        "Static so far: the demolition it exists for is not built yet.\n"
+        "A three-section five-storey 1-464 panel block -- a khrushchyovka -- taken down by controlled explosion in its own courtyard, in one six-second cycle.\n"
         "\n"
         "One world unit is one metre. 58.20 m along the block, 11.82 m over the facades, 14.70 m to the top of the parapet.\n"
         "Origin sits on the ground at the centre of the footprint, +X along the block, +Z out through the main facade.\n"
@@ -2043,6 +2733,23 @@ const Scene SCENE = {
         "The car is a VAZ-2101 from the specification and ref_08.jpg: 4.073 by 1.611 by 1.382, 2.424 wheelbase, 1.349 front track, 0.170 clearance, with the beltline read off the elevation at 0.83 and the bonnet crown standing above it rather than below, which is what gives the car its flat-topped nose. Its wheel arches are swept as vertical strips whose floor follows the arch circle, in the outer 0.22 m of each flank only, so the arch is a recess rather than a tunnel through the car. Without that cut the 1.349 track sits entirely inside the 1.611 body and the car reads as a crate.\n"
         "Four cars share one body mesh and differ by the per-instance tint, which is why the body and the trim are separate types: tinting one instance tints all of its materials, and a green car should not have green glass or green tyres.\n"
         "\n"
+        "The demolition.\n"
+        "A 1-464 has no frame: every cross wall carries load, which is why the series went up so fast and why it comes down the way it does. Charges are drilled into the cross walls of the bottom two storeys and fired in a sequence running the length of the block, so the building loses its footing progressively and folds instead of toppling; what is above the cut then descends almost vertically and pancakes, with the facade panels peeling off outwards because nothing holds them on once the cross walls behind them are gone.\n"
+        "Every one of the 1355 fragments does three things and no more. It waits until the collapse front reaches it, which has two components: the firing sequence, running the length of the block in 0.42 s, and the crushing front, climbing at 11 m/s because each storey has to be destroyed before the one above it can start down. It flies ballistically, tumbling about its own centroid rather than its local origin, which would be a hinge no broken panel has. And it lands on the rubble pile. There is no contact between fragments; at this scale what reads is the timing and the peel, not any individual collision.\n"
+        "Glazing is the exception to the front: every window in the building goes at the shock rather than when its own storey is reached, thrown 3.6 to 7.8 m/s and spinning five times faster than a panel. Balconies are the other: a cantilever with nothing above it, so it fails 0.22 s early -- clamped so that nothing anywhere moves before the charges it is a consequence of.\n"
+        "\n"
+        "How high the pile stands is not a chosen number. Each type\'s mesh volume is computed by the divergence theorem at build time, summed over every fragment that falls, bulked by 1.55 for what a solid becomes once it is broken, and fitted to the pile\'s own shape by integrating it: 1881 m3 of material makes 2916 of rubble and a crest 2.91 m deep. 226 fragments start under that crest and never move, because the bottom of the building is the bottom of the pile.\n"
+        "\n"
+        "Dust is three populations, because one averaging them reads as ground fog. The jets are what comes straight back out of the drill holes at the instant the charges fire -- small, fast, outward at 15 to 24 m/s, dead inside two seconds. The surge is air driven out sideways by the floors slamming down on it, which leaves the footprint low and rolls outwards along the ground. The column is what rises off the pile afterwards, slower and much taller. 1190 puffs in all. A puff is thrown and then sheds its speed to the air as a first-order decay to a terminal displacement, which is why dust travels so much further than a thrown solid and then simply hangs.\n"
+        "The soft edge is a second small shader, and both it and the technique are models/humvee.c\'s. A closed blob has a hard silhouette at any subdivision, so a puff\'s alpha is scaled by how squarely its surface faces the camera, which is zero exactly at its own silhouette; its normals are radial, of the sphere the lumps are pushed out from rather than of the lumpy surface, so that falloff runs monotonically to the edge instead of leaving a ring of zero alpha inside it. The detonation flashes run the same shader, additively: they were a radial glow disc at first, and the local planar projection put the blob\'s u,v in [-1,1] against a clamped texture whose disc occupies [0,1], so three quadrants of every flash sampled the transparent edge and what showed was a sliver.\n"
+        "The charges are milliseconds of light, and --anim samples the cycle at N evenly spaced phases, so a truthful flash would be caught only by luck. It is held over 0.30 s instead -- a playback concession, not a claim about explosives -- which puts the window at 0.90 to 1.20 s and straddles t = 1.0, so every --frames that is a multiple of 6 lands a frame inside it.\n"
+        "\n"
+        "The yard is not destroyed but it is not untouched. An air blast leaves the building when the charges fire and travels at 105 m/s, so the lashing runs outwards across the scene rather than happening to everything at once; what it reaches gets one damped oscillation, scaled by distance. Trees lean 17 degrees at 0.62 Hz, cars rock on their springs at 1.65, and the benches and bins closest to the facade go over and stay over. A tree can only hinge at its root here: skinning needs bone attributes the harness\'s shader does not declare, so a rigid trunk leaning is the honest limit rather than a choice, where a real tree bends most at the top.\n"
+        "\n"
+        "This is the one model here whose loop deliberately does not close. A demolition is a one-shot event, and --anim plays it once; rather than pretend otherwise, CheckLoopSeam measures the seam and reports it, and it is 17.9 m at the worst fragment.\n"
+        "\n"
+        "--part frames the building\'s parts on their rest pose rather than on the swept cycle. Sweeping them gives the whole debris field, which frames every part identically and destroys exactly what --part exists for; only the debris and the dust, which have no rest pose worth framing, are swept.\n"
+        "\n"
         "The plinth, the entrance steps and the ground exist once each and are placed groups rather than instanced ones.\n"
         "One thing here is normally the harness's business: a fourth light. The harness lights with three point lights standing at (8,10,8), (-9,5,-7) and (0,-9,5), which surround a 4.5 m vehicle and sit inside a 58 m building, so every outward-facing surface on this one points away from all three and falls back on lighting.fs's ambient term, which line 75 divides by ten -- a 118 texel then leaves the gamma correction at 0.16, which is what turned the gable into a black slab.\n"        "A directional light is the only kind whose geometry does not depend on how big the scene is, so this model fills the shader's one free slot with a sun and leaves the three point lights as the fill, rather than moving them and changing every other model in the repo.\n"
         "Surfacing is eight maps built in code from tiling value noise, projected planar in each mesh's own frame rather than the world's, because an instanced mesh has no world position; every instance would then carry an identical texture placement, so each also carries a hashed per-instance shade of +-8 to break that up.",
@@ -2051,7 +2758,7 @@ const Scene SCENE = {
     .unload = Unload,
     .update = Update,
     .duration = CYCLE,
-    .animYaw = 35.0f,
+    .animYaw = 40.0f,
     .parts = PARTS,
     .partCount = COUNT_OF(PARTS),
     .target = { 0.0f, 6.0f, 0.0f },
