@@ -464,28 +464,34 @@ static void WireLoop(Builder *b, float px, float cz, float cy, float rz, float r
 // Materials and groups
 // ---------------------------------------------------------------------------
 
+// MAT_MILLED and MAT_STEEL share the one milled-steel map and differ only in colour: the receiver is that surface blued, the bolt and piston are it bare.
 typedef enum {
-    MAT_WOOD, MAT_STEEL, MAT_GREY, MAT_BLUED, MAT_BRASS, MAT_COUNT
+    MAT_WOOD, MAT_STEEL, MAT_MILLED, MAT_GREY, MAT_BLUED, MAT_BRASS, MAT_COUNT
 } MatId;
 
 // lighting.fs gamma-corrects with pow(c, 1/2.2), so these read considerably lighter than the raw values once shaded.
-// Each entry is the material at its cleanest and brightest, not its average: the diffuse maps below are eight-bit and multiply the colour, so they can only ever subtract from it. The average surface is the colour times the map's mean, which is roughly 0.65 for wood, 0.60 for steel, 0.72 for grey and 0.38 for blued.
+// Each entry is the material at its cleanest and brightest, not its average: the diffuse maps below are eight-bit and multiply the colour, so they can only ever subtract from it. The average surface is the colour times the map's mean, and BuildTextures measures those means rather than trusting this comment: 0.655 wood, 0.557 steel and milled, 0.715 grey, 0.366 blued, 0.755 brass. The 0.60 previously quoted for steel was 8 percent high, which is exactly the sort of drift the check is there to catch.
+// EVERY METAL FINISH ON THIS RIFLE IS ONE COLOUR, and the map means are what make that awkward to write down. ref_04 shows barrel, receiver, sights, trigger group and fittings all at one dark value, so the target is one average SURFACE value, not one material colour: blued's 56 through a mean of 0.366 gives 20.9, and every other metal carries 20.9 divided by its own mean. Milled 20.9/0.557 = 37.5, grey 20.9/0.715 = 29.2.
+// Setting them to one COLOUR instead is the trap, and it is what this model did: identical colours through maps averaging 0.366 and 0.715 come out two to one apart, which is how the phosphate parts, at 56 against blued's 21, ended up the brightest metal on a rifle whose reference has them the same dark as the barrel. The receiver was worse again at 79, four times the barrel bolted to it.
+// The one metal deliberately off the common value is MAT_STEEL, bare bright steel: the bolt, the gas piston and the wear face on the carrier's flank, and that wear face is the only thing the ejection port has to show moving against a dark surround.
 static const Color MAT_COLOR[MAT_COUNT] = {
-    [MAT_WOOD]  = { 138,  54,  27, 255 },
-    [MAT_STEEL] = { 140, 144, 152, 255 },
-    [MAT_GREY]  = {  78,  80,  86, 255 },
-    [MAT_BLUED] = {  56,  56,  60, 255 },
-    [MAT_BRASS] = { 168, 128,  48, 255 },
+    [MAT_WOOD]   = { 138,  54,  27, 255 },
+    [MAT_STEEL]  = { 140, 144, 152, 255 },
+    [MAT_MILLED] = {  38,  37,  38, 255 },
+    [MAT_GREY]   = {  29,  29,  30, 255 },
+    [MAT_BLUED]  = {  56,  56,  60, 255 },
+    [MAT_BRASS]  = { 168, 128,  48, 255 },
 };
 
 // Millimetres covered by one texture repeat, along the part (u) and across it (v).
 // Wood is the anisotropic one, and the v figure is the number that matters: on a swept part v is the section perimeter, so the handguard's 130 mm girth wraps the map most of the way round. At 145 mm the 22 latewood lines the map carries land about 6.6 mm apart and about eighteen of them go round the handguard, which is what references/ak47/ref_05.jpg shows. An earlier 78 mm put nearly forty round it and the wood read as corrugation.
 static const Vector2 MAT_REPEAT[MAT_COUNT] = {
-    [MAT_WOOD]  = { 320.0f, 145.0f },
-    [MAT_STEEL] = { 165.0f,  95.0f },
-    [MAT_GREY]  = {  62.0f,  62.0f },
-    [MAT_BLUED] = { 128.0f,  96.0f },
-    [MAT_BRASS] = {  26.0f,  18.0f },
+    [MAT_WOOD]   = { 320.0f, 145.0f },
+    [MAT_STEEL]  = { 165.0f,  95.0f },
+    [MAT_MILLED] = { 165.0f,  95.0f },
+    [MAT_GREY]   = {  62.0f,  62.0f },
+    [MAT_BLUED]  = { 128.0f,  96.0f },
+    [MAT_BRASS]  = {  26.0f,  18.0f },
 };
 
 // ---------------------------------------------------------------------------
@@ -589,8 +595,8 @@ static Image WoodImage(void)
     return img;
 }
 
-// Milled receiver: draw-marks along the length, a broad polish sweep on the high spots and a cooler patina in the hollows.
-// ref_04 shows this as worn bright steel, not as a black finish.
+// Milled steel: draw-marks along the length, a broad polish sweep on the high spots and a cooler patina in the hollows. Loaded twice, as MAT_MILLED for the blued receiver and as MAT_STEEL for the bare bolt and piston, which differ in colour and not in surface.
+// The receiver keeps this map rather than moving to the blued one along with its colour. The blued map's wear term ramps a tenth of its area up to warm bare steel in blobs three by seven per 128 by 96 mm repeat, which is sized for a magazine rib and reads as wear there. Across the receiver's 248 by 34 flank the same blobs come out as six tan smears the size of a thumb, which is what the first attempt at this looked like: see renders/ak47/v12.
 static Image SteelImage(void)
 {
     Image img = GenImageColor(TEX_SIZE, TEX_SIZE, WHITE);
@@ -689,9 +695,30 @@ static void BuildTextures(void)
     Image img[MAT_COUNT];
     img[MAT_WOOD] = WoodImage();
     img[MAT_STEEL] = SteelImage();
+    img[MAT_MILLED] = SteelImage();
     img[MAT_GREY] = GreyImage();
     img[MAT_BLUED] = BluedImage();
     img[MAT_BRASS] = BrassImage();
+
+    // Every metal but the bare steel inside the action is meant to land on one average surface value, and a map is free to be edited without anyone noticing that its mean moved and took its material's colour off that value with it. So the means are measured here rather than remembered: the figures quoted against MAT_COLOR come from this, and it reports the spread so a drift shows up as a number instead of as a reviewer saying one part looks lighter than another. It is the same build-time check CheckAction is, applied to colour instead of to clearances.
+    float surf[MAT_COUNT];
+    for (int m = 0; m < MAT_COUNT; m++) {
+        double sr = 0.0, sg = 0.0, sb = 0.0;
+        const Color *px = (const Color *)img[m].data;
+        for (int i = 0; i < TEX_SIZE * TEX_SIZE; i++) { sr += px[i].r; sg += px[i].g; sb += px[i].b; }
+        double n = (double)TEX_SIZE * TEX_SIZE * 255.0;
+        surf[m] = (float)((MAT_COLOR[m].r * sr + MAT_COLOR[m].g * sg + MAT_COLOR[m].b * sb) / (3.0 * n));
+        TraceLog(LOG_INFO, "ak47: material %d map mean %.3f, average surface %.1f", m, (sr + sg + sb) / (3.0 * n), surf[m]);
+    }
+    const MatId metal[] = { MAT_MILLED, MAT_GREY, MAT_BLUED };
+    float lo = surf[metal[0]], hi = surf[metal[0]];
+    for (int i = 1; i < (int)(sizeof(metal) / sizeof(metal[0])); i++) {
+        if (surf[metal[i]] < lo) lo = surf[metal[i]];
+        if (surf[metal[i]] > hi) hi = surf[metal[i]];
+    }
+    TraceLog(lo > 0.0f && hi / lo > 1.15f ? LOG_WARNING : LOG_INFO,
+             "ak47: the finished metals run %.1f to %.1f in average surface value, a spread of %.0f percent; they are meant to be one colour",
+             lo, hi, lo > 0.0f ? (hi / lo - 1.0f) * 100.0f : 0.0f);
 
     for (int m = 0; m < MAT_COUNT; m++) {
         gTex[m] = LoadTextureFromImage(img[m]);
@@ -1119,7 +1146,8 @@ static void SidePlate(Builder *b, float x0, float x1, bool withPort)
 static void BuildRecv(void)
 {
     GroupOrigin(&gRecv, STATIC_ORIGIN);
-    Builder *m = &gRecv.b[MAT_STEEL];
+    // Blued, at the same surface value as the barrel and the magazine, and keeping the milled map because a 248 by 34 flank is not what the blued map's wear blobs are sized for. It was bare bright steel until now, on the strength of ref_04 showing the receiver lighter than the barrel: it is lighter there, but by a little, and MAT_STEEL against MAT_BLUED is four times the surface value, which made the receiver read as a different metal from the rest of the rifle rather than as the same metal worn brighter.
+    Builder *m = &gRecv.b[MAT_MILLED];
     Builder *s = &gRecv.b[MAT_GREY];
 
     // Base slab under the carrier channel.
@@ -1138,12 +1166,7 @@ static void BuildRecv(void)
     // Rear wall: the surface the carrier runs back against, and therefore the thing that sets the travel.
     Box(m, -CHAN_HW, CHAN_HW, CHAN_Y0, RCV_TOP, CHAN_Z1, RCV_Z1);
 
-    // The channel interior is finished dark, which is both true of a receiver and the only thing that made the carrier's travel legible. Four review rounds running reported the ejection port as a barely changing recess: bare milled walls, a blued carrier and a bright wear patch on it are all mid greys at this camera distance, so nothing in the opening changed value as the carrier ran. A dark background behind a bright moving face does.
-    // Only the left wall, the floor and the rear wall are lined. They are what you see THROUGH the port; the right wall is the one with the hole in it. Each liner is buried into the wall behind it rather than laid on its face, so no two surfaces are coincident.
-    Builder *d = &gRecv.b[MAT_BLUED];
-    Box(d, -CHAN_HW - 0.6f, -CHAN_HW + 0.25f, CHAN_Y0, RCV_TOP, RCV_Z0, CHAN_Z1);
-    Box(d, -CHAN_HW, CHAN_HW, CHAN_Y0 - 0.6f, CHAN_Y0 + 0.25f, RCV_Z0, CHAN_Z1);
-    Box(d, -CHAN_HW, CHAN_HW, CHAN_Y0, RCV_TOP, CHAN_Z1 - 0.25f, CHAN_Z1 + 0.6f);
+    // The channel interior has to stay dark, and now it is dark for free. Four review rounds running reported the ejection port as a barely changing recess, because bare milled walls, a blued carrier and a bright wear patch on it are all mid greys at this camera distance and nothing in the opening changed value as the carrier ran. What fixed it was a dark background behind a bright moving face, and while the receiver was bare steel that took three blued liner boxes buried into the left wall, the floor and the rear wall. A receiver blued throughout is that background already, so the liners sat at the same surface value as the walls they lined, invisible, and are gone. Anything that puts bare steel back into this channel has to put them back with it: the bright wear face on the carrier is the only thing in the port that moves visibly, and it needs something dark to move against.
     Prism(m, -RCV_SIDE, RCV_SIDE, 350.0f, 380.0f, 171.0f, 174.0f, 232.0f, 232.0f);
     SidePlate(m, RCV_CORE, RCV_SIDE, true);
     SidePlate(m, -RCV_SIDE, -RCV_CORE, false);
@@ -1366,7 +1389,7 @@ static void BuildCarrier(void)
     Builder *s = &gCarrier.b[MAT_BLUED];
     Builder *b = &gCarrier.b[MAT_STEEL];
 
-    // The carrier is blued, as references/ak47/ref_01.jpg and ref_03.jpg both show it, and the channel it runs in is bare milled steel. That contrast is the whole of what the ejection port has to show: a bright carrier in a bright channel changes nothing visible as it travels, which is what a first attempt at this looked like.
+    // The carrier is blued, as references/ak47/ref_01.jpg and ref_03.jpg both show it, and so now is the channel it runs in. The one thing the ejection port has to show is the bright wear face below travelling against that dark surround: a bright carrier in a bright channel changes nothing visible as it travels, which is what a first attempt at this looked like.
     // Carrier body, and a skirt dropping alongside the bolt over the rear third, which is the stepped profile ref_03 shows.
     Box(s, -CAR_HW, CAR_HW, CAR_Y0, CAR_Y1, CAR_Z0, CAR_Z0 + CAR_L);
     Box(s, -CAR_HW, CAR_HW, BORE - BOLT_R - 0.4f, CAR_Y0, CAR_Z0 + 90.0f, CAR_Z0 + CAR_L);
@@ -2127,7 +2150,7 @@ const Scene SCENE = {
         "The check samples the case's SURFACE, sixteen points around it at each of five stations, not its centreline. Sampling the axis says nothing about a body 11.35 thick and it hid all three of the defects above: it reported the ejection as clearing while brass was going through the plate.\n"
         "The case is never hidden. A first version switched it off at 85 percent of the cycle and the review in renders/ak47/v1 caught it vanishing while still a grid square from the rifle and well inside the frame. Flying it out of shot instead is not available: on one time scale for the whole model it has 0.076 s of real flight in a cycle, which carries it 152 mm, against a rifle 880 mm long. So it stays in flight to the end, and the case in the last frame and the case in the first are different rounds, because a repeating cycle fires a fresh one each time.\n"
         "receiver: unchanged outside, cut away inside. A solid billet with two windows milled into it is enough while nothing behind them moves, and that is what this receiver was before the action was posed. Here the core is cut back to a real channel 23 wide with its floor at y 196, a full-height wall on each flank so the milled lightening cut still has a floor, and a rear wall at z 600. The right wall drops to the port sill over the ejection port, so the port is now a hole into the channel instead of a shallow recess, and the charging-handle slot is opened forward from z 380 so the handle has somewhere to sit and somewhere to run.\n"
-        "The channel's left wall, floor and rear wall are finished dark, and the carrier carries a bright 52 by 14 wear face on its right flank. Both are true of a receiver and a carrier that has cycled, and both are here because four review rounds running reported the ejection port as a barely changing recess: bare milled walls, a blued carrier and a bright patch on it are all mid greys at this camera distance, so nothing in the opening changed value as the carrier ran. Making the patch bigger did not fix that and was not the problem. A dark background behind a bright moving face was. Each liner is buried into the wall behind it rather than laid on its face, so no two surfaces are coincident.\n"
+        "The channel interior is dark and the carrier carries a bright 52 by 14 wear face on its right flank. Both are true of a receiver and a carrier that has cycled, and the pairing is here because four review rounds running reported the ejection port as a barely changing recess: bare milled walls, a blued carrier and a bright patch on it are all mid greys at this camera distance, so nothing in the opening changed value as the carrier ran. Making the patch bigger did not fix that and was not the problem. A dark background behind a bright moving face was. While the receiver was bare bright steel the dark background was three blued liner boxes buried into the left wall, the floor and the rear wall; the receiver is blued throughout now, so the channel is that background on its own and the liners have gone.\n"
         "\n"
         "THE TRAVEL IS NOT A MEASURED FIGURE, AND THE MODEL IS INCONSISTENT ABOUT IT\n"
         "No reference found gives a bolt carrier travel for the AK-47, so 72 mm is not measured: it is the largest travel this receiver admits, the carrier stopping 8 mm short of the channel's rear wall. CheckAction measures that at build time over 360 steps and reports it, together with the margin at the charging handle's slot, the piston head against BOTH ends of the gas tube, the trigger shoe against the guard's rear web, the recoil the momentum comes to and whether it is back in battery when the cycle repeats, and the height at which the case crosses the receiver wall against the ejection port's opening.\n"
@@ -2162,10 +2185,13 @@ const Scene SCENE = {
         "fire_control: trigger guard bow 6.2 deep and 16 wide, swept through six frames so it follows the measured sag from y 135.8 at z 510 to 132.3 at 550 as one continuous contour rather than running as a straight bar, its two webs, trigger, magazine catch, wooden pistol grip swept along an axis raked 17 degrees with a palm swell at the heel.\n"
         "stock: wrist ferrule tapering into the wood, wooden butt swept through seventeen flat-cheeked sections so the comb rise at z 720 to 736 comes out as a curve rather than a step, the last section plane tilted onto the raked butt face so the rake is in the wood and not just the buttplate; left-side sling swivel loop.\n"
         "\n"
-        "Surfaces carry procedural diffuse maps, four 512x512 images generated at init and shared by all seven parts: wood, milled steel, phosphate grey and blued.\n"
-        "lighting.fs multiplies the map by the material colour and an eight-bit map cannot exceed 1.0, so each map is a pure darkener and MAT_COLOR is now the clean bright state of the material rather than its average; mean map values are about 0.65 wood, 0.60 steel, 0.72 grey and 0.38 blued.\n"
+        "Surfaces carry procedural diffuse maps, 512x512 images generated at init and shared by every part: wood, milled steel, phosphate grey, blued and brass. Milled steel is generated twice and carried as two materials, MAT_MILLED for the blued receiver and MAT_STEEL for the bare bolt and piston, which differ in colour and not in surface.\n"
+        "EVERY METAL FINISH IS ONE COLOUR, which ref_04 shows and which the maps make awkward to write down. Each map is a darkener with a different mean, so equal material colours do not give equal surfaces: the target is one average surface value, blued's 56 through a mean of 0.366 giving 20.9, and each other metal carries 20.9 divided by its own mean, milled 37.5 at 0.557 and phosphate grey 29.2 at 0.715. Equal colours through those means came out two to one apart, which is how the phosphate parts, the sights and trigger group and fittings, ended up the brightest metal on a rifle whose reference has them the same dark as the barrel. BuildTextures measures the means at init rather than trusting a number in a comment, and warns if the finished metals drift more than 15 percent apart; they currently run 20.9 to 21.0.\n"
+        "The receiver is the part this was noticed on. It was bare bright steel at four times the surface value of the barrel bolted to it, reading as a different metal rather than the same one worn brighter. It is now blued to the common value but keeps the milled map rather than moving to the blued one: the blued map's wear term ramps a tenth of its area to warm bare steel in blobs sized for a magazine rib, and across a 248 by 34 receiver flank those come out as six thumb-sized tan smears. renders/ak47/v12 is that intermediate state, kept because it is the argument for the split.\n"
+        "The only metal deliberately off the common value is bare steel inside the action: the bolt, the gas piston and the wear face on the carrier's flank, which is the one bright thing the ejection port has to show moving.\n"
+        "lighting.fs multiplies the map by the material colour and an eight-bit map cannot exceed 1.0, so each map is a pure darkener and MAT_COLOR is now the clean bright state of the material rather than its average; measured mean map values are 0.655 wood, 0.557 steel and milled, 0.715 grey, 0.366 blued and 0.755 brass. The 0.60 this line used to quote for steel was 8 percent high, which is why the means are now measured rather than remembered.\n"
         "wood: 22 warped latewood lines per repeat, each gated by a noise field that varies along the grain so no line survives the whole length of a part, over broad tonal blotches, longitudinal figure and occasional near-black mineral streaks; broad tone carries most of the variation and the banding only a sixth of it, and darker wood is shifted redder, since latewood is denser rather than sooty. milled steel: draw marks along the length, a polish sweep on the high spots, cooler patina in the hollows and dark pitting. grey: fine granular phosphate tooth. blued: the widest map of the four, a dark finish worn through to warm bare steel over roughly a tenth of its area.\n"
-        "Texture coordinates are in millimetres and divided by a per-material repeat length, so one repeat is a fixed physical size on every part: 320 by 145 for wood, 165 by 95 steel, 62 square grey, 128 by 96 blued. u runs along the part and v across it, so wood grain follows the barrel axis on the handguards and the comb line on the stock. Flat faces project planar by dominant face normal, tubes map axially and circumferentially with the axial coordinate taken from the world origin so the three barrel segments continue one pattern, and swept sections map by path length and section perimeter. Noise is periodic value noise so every map tiles.\n"
+        "Texture coordinates are in millimetres and divided by a per-material repeat length, so one repeat is a fixed physical size on every part: 320 by 145 for wood, 165 by 95 steel and milled, 62 square grey, 128 by 96 blued, 26 by 18 brass. u runs along the part and v across it, so wood grain follows the barrel axis on the handguards and the comb line on the stock. Flat faces project planar by dominant face normal, tubes map axially and circumferentially with the axial coordinate taken from the world origin so the three barrel segments continue one pattern, and swept sections map by path length and section perimeter. Noise is periodic value noise so every map tiles.\n"
         "\n"
         "Widths are the weakest numbers here: no plan or front elevation was found, so only the receiver is measured (34.4 across, from the assembled rear receiver view in references/ak47/ref_06.jpg). Handguard 42, magazine 28, grip 31, and a buttstock tapering from 27 at the wrist to 40 at the butt, are all inferred from the receiver and should be treated as the least trustworthy dimensions in the model.\n"
         "Known simplifications, all repeatedly flagged in review and all consequences of building from hexahedra and swept sections: the magazine ribs are swept strips standing 0.3 proud that fade out at both ends rather than true pressings; the gas block, front sight base and handguard band are chamfered prisms rather than forgings flowing into rounded barrel collars; and the receiver flanks are flat plates with milled pockets rather than a body that changes section along its length.\n"
