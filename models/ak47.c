@@ -971,29 +971,40 @@ static void BuildWood(void)
 
     Frame fr[10];
 
+    // The lower handguard reached z 340 and left a 26 mm hole between its rear face and the receiver, which review saw as the wood not matching the receiver. It came from reading the measured silhouette wrong: z 336 is where the wood's UNDERSIDE stops descending and sweeps up toward the receiver, not where the wood ends. Both photographs put the end of the wood at z 365 to 367, ref_04 at 367 and ref_05 at 364, with the retaining band beyond that and the receiver's front face at 372 to 375, which is where this model already had it.
     static const Node lower[] = {
         { 210.0f, 200.3f, 18.0f, 16.6f },
         { 226.0f, 199.9f, 21.0f, 17.0f },
         { 260.0f, 197.5f, 21.0f, 17.8f },
         { 290.0f, 195.7f, 21.0f, 18.0f },
-        { 312.0f, 195.9f, 20.5f, 19.0f },
-        { 340.0f, 196.0f, 19.0f, 19.0f },
+        { 312.0f, 195.9f, 20.5f, 19.4f },
+        { 340.0f, 194.5f, 19.6f, 20.3f },
+        { 366.0f, 193.0f, 18.8f, 20.0f },
     };
-    NodeFrames(fr, lower, 6);
-    Sweep(w, HG_LOWER, (int)(sizeof(HG_LOWER) / sizeof(HG_LOWER[0])), fr, 6, true, true);
+    // The last two stations drop the shell's underside onto the receiver's own floor line instead of stopping 4.6 mm above it. The wood was leaving its rear end at y 177 while RecvFloor puts the receiver at 174.9 by z 372, so the receiver hung below the wood and the joint stepped; ref_04 runs the two into one line, wood at 173.8 by z 365 into receiver floor 174.9 at 372. The same reading puts the shell's centre at 192 to 195 through here rather than the flat 196 it had, with a half depth nearer 21 than 19.
+    NodeFrames(fr, lower, 7);
+    Sweep(w, HG_LOWER, (int)(sizeof(HG_LOWER) / sizeof(HG_LOWER[0])), fr, 7, true, true);
 
+    // The upper handguard ended at 326 against a rear sight base whose front face is at 328, so it hung 2 mm clear of everything and read as detached. Both photographs run the wood to about 331, into the base rather than up to it.
     static const Node upper[] = {
         { 214.0f, 231.0f, 13.5f, 12.0f },
         { 226.0f, 231.6f, 16.0f, 13.1f },
         { 270.0f, 231.9f, 16.5f, 13.5f },
         { 310.0f, 232.9f, 16.0f, 13.7f },
-        { 326.0f, 233.0f, 14.5f, 13.0f },
+        { 331.0f, 233.0f, 14.5f, 13.0f },
     };
     NodeFrames(fr, upper, 5);
     Sweep(w, HG_UPPER, (int)(sizeof(HG_UPPER) / sizeof(HG_UPPER[0])), fr, 5, true, true);
 
-    Box(s, -16.5f, 16.5f, 217.0f, 244.0f, 209.0f, 219.0f);
-    Box(s, -19.5f, 19.5f, 175.0f, 217.0f, 338.0f, 352.0f);
+    // Both bands are swept on the section of the shell they clamp, not boxed around it. A hexahedron wrapped round a rounded sweep is a square collar on a round part, and its four arrises are the sharp edge review saw at the handguard's attachment: the wood's own end cap is already buried inside the band, so the edge was never the wood's. The rifle's bands follow the wood, standing about 0.8 mm proud of it, which is what these do.
+    static const Node uband[] = { { 209.0f, 231.0f, 14.3f, 12.7f }, { 219.0f, 231.3f, 16.3f, 13.6f } };
+    NodeFrames(fr, uband, 2);
+    Sweep(s, HG_UPPER, (int)(sizeof(HG_UPPER) / sizeof(HG_UPPER[0])), fr, 2, true, true);
+
+    // The lower band goes where the photographs put it, over the joint at the end of the wood, and is the 9 mm they show rather than 14. At z 338 it was sitting in the middle of the handguard.
+    static const Node lband[] = { { 364.0f, 193.1f, 19.6f, 20.8f }, { 373.0f, 193.0f, 19.6f, 20.8f } };
+    NodeFrames(fr, lband, 2);
+    Sweep(s, HG_LOWER, (int)(sizeof(HG_LOWER) / sizeof(HG_LOWER[0])), fr, 2, true, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -1167,7 +1178,8 @@ static void BuildRecv(void)
     Box(m, -CHAN_HW, CHAN_HW, CHAN_Y0, RCV_TOP, CHAN_Z1, RCV_Z1);
 
     // The channel interior has to stay dark, and now it is dark for free. Four review rounds running reported the ejection port as a barely changing recess, because bare milled walls, a blued carrier and a bright wear patch on it are all mid greys at this camera distance and nothing in the opening changed value as the carrier ran. What fixed it was a dark background behind a bright moving face, and while the receiver was bare steel that took three blued liner boxes buried into the left wall, the floor and the rear wall. A receiver blued throughout is that background already, so the liners sat at the same surface value as the walls they lined, invisible, and are gone. Anything that puts bare steel back into this channel has to put them back with it: the bright wear face on the carrier is the only thing in the port that moves visibly, and it needs something dark to move against.
-    Prism(m, -RCV_SIDE, RCV_SIDE, 350.0f, 380.0f, 171.0f, 174.0f, 232.0f, 232.0f);
+    // The junction block under the receiver's front. It began at z 350 while the wood only reached 340, which is what left the gap; now the wood runs to 366 and this starts at 364, so the two overlap instead of leaving daylight. It cannot start any further forward than the wood's underside without a metal fin appearing below the wood, since its floor at 171 to 174 sits below the wood's 177.
+    Prism(m, -RCV_SIDE, RCV_SIDE, 364.0f, 380.0f, 172.4f, 174.0f, 232.0f, 232.0f);
     SidePlate(m, RCV_CORE, RCV_SIDE, true);
     SidePlate(m, -RCV_SIDE, -RCV_CORE, false);
 
@@ -1181,9 +1193,10 @@ static void BuildRecv(void)
     cover[1].ax = (Vector3){ 17.8f, 0.0f, 0.0f };
     cover[1].ay = (Vector3){ 0.0f, 5.8f, 0.0f };
     Sweep(m, dome, dn, cover, 2, true, true);
+    // The tang's rear top was 218 against a stock wrist that reaches 206 there, so 12 mm of receiver stood proud above the wood and the joint read as a wedge stuck on the end of the rifle. ref_05 measures the receiver's rear face at z 632 running up to y 206, level with the top of the ferrule that follows it, and the top line steps down to it from the dust cover rather than overhanging.
     Vector3 tang[8] = {
         { -16.5f, 196.0f, 606.0f }, { 16.5f, 196.0f, 606.0f }, { 16.5f, 196.0f, 634.0f }, { -16.5f, 196.0f, 634.0f },
-        { -16.5f, 238.6f, 606.0f }, { 16.5f, 238.6f, 606.0f }, { 16.5f, 218.0f, 634.0f }, { -16.5f, 218.0f, 634.0f },
+        { -16.5f, 238.6f, 606.0f }, { 16.5f, 238.6f, 606.0f }, { 16.5f, 206.0f, 634.0f }, { -16.5f, 206.0f, 634.0f },
     };
     Hex(m, tang);
     Prism(m, -RCV_SIDE, RCV_SIDE, RCV_Z1, 634.0f, RecvFloor(RCV_Z1), 160.0f, 196.0f, 196.0f);
@@ -1352,14 +1365,19 @@ static void BuildStock(void)
     Builder *m = &gStock.b[MAT_GREY];
     Builder *s = &gStock.b[MAT_GREY];
 
+    // The wrist ferrule. It is a band wrapping the OUTSIDE of the wood, and it was inside it: at z 640 the butt's own section reaches y 204.5 and the ferrule's top was 203.6, so the wood came through it and the joint read as receiver, step, wood, with no band visible at all. ref_05 shows the band plainly, about 20 mm of grey between the receiver's rear face and the start of the wood.
+    // Its rear end is therefore sized from the butt's first stations rather than from the photograph: the butt spans y 156.2 to 201.6 at z 658, and this stands 2 mm proud of that all round. The front end matches the receiver's rear section it butts against, y 160 to 206 at z 628, which is the tang's new top.
     Vector3 wrist[8] = {
-        { -16.5f, 160.0f, 628.0f }, { 16.5f, 160.0f, 628.0f }, { 14.4f, 163.0f, 658.0f }, { -14.4f, 163.0f, 658.0f },
-        { -16.5f, 214.0f, 628.0f }, { 16.5f, 214.0f, 628.0f }, { 14.4f, 206.0f, 658.0f }, { -14.4f, 206.0f, 658.0f },
+        { -16.5f, 160.0f, 628.0f }, { 16.5f, 160.0f, 628.0f }, { 14.4f, 155.5f, 658.0f }, { -14.4f, 155.5f, 658.0f },
+        { -16.5f, 206.0f, 628.0f }, { 16.5f, 206.0f, 628.0f }, { 14.4f, 203.5f, 658.0f }, { -14.4f, 203.5f, 658.0f },
     };
     Hex(m, wrist);
 
     Vector2 sect[SECT_MAX];
     Frame fr[20];
+    // These are the original measured stations, restored after a re-measurement made the butt about 20 mm too shallow and turned it into a paddle.
+    // Worth keeping the failure written down, because the method that produced it looked rigorous. A rendered silhouette was compared against ref_04 station by station and reported the butt as too deep along its underside; the vertical scale of that comparison was calibrated from two of the model's own features and was wrong, and a hand reading off a crop agreed with it only because the same crop had the butt running off the frame. Two wrong methods agreeing is not corroboration.
+    // The check that settles it needs no render and no calibration: take ref_04's alpha, measure the silhouette's height in millimetres at a station, and compare it against 2*hh*dz/len from the node list here. That gives ref 95.2 against 91.0 at z 800 and 112.0 against 108.5 at z 856, so these stations are right to within about 4 mm and if anything a shade shallow. Anything proposing to move them should have to beat that comparison first.
     static const Node butt[] = {
         { 640.0f, 183.2f, 13.6f, 21.9f },
         { 656.0f, 179.5f, 13.7f, 23.3f },
@@ -2303,12 +2321,13 @@ const Scene SCENE = {
         "880 overall, bore axis at y 204.4, cleaning rod axis 191.0, gas tube axis 228.8, overall height 256.\n"
         "\n"
         "The side elevation is measured, not estimated. ref_04 was thresholded to a silhouette and sampled column by column at 0.3915 mm/px, and every station below comes from that table:\n"
-        "front sight block z 14 to 46, gas block 105 to 143, exposed gas tube 143 to 212, handguards 210 to 336, receiver 372 to 620 with its floor dropping 175 to 165 and its cover crown at 240, magazine 340 to 505, trigger guard 508 to 562, pistol grip 588 to 640, buttstock 640 to 880 with the toe at z 858 and the heel at 877.\n"
+        "front sight block z 14 to 46, gas block 105 to 143, exposed gas tube 143 to 212, handguards 210 to 366, receiver 372 to 620 with its floor dropping 175 to 165 and its cover crown at 240, magazine 340 to 505, trigger guard 508 to 562, pistol grip 588 to 640, buttstock 640 to 880 with the toe at z 858 and the heel at 877.\n"
         "\n"
         "Seven parts.\n"
         "front_sight: muzzle nut, tapered base collar, and a tower built as a front post, a rear buttress and a bridge over the top, so the window between them measures z 18 to 34 by y 218 to 229 as the reference does; cylindrical post housing at y 250 with the post reaching 256.\n"
         "barrel: 13.7 diameter ahead of the gas block and 15.3 behind, cleaning rod carried aft to z 340, gas block with a chamfered crown, a barrel collar and a diagonal riser, gas tube waisted to 16 diameter over the slotted section where a dark floor framed by two rails and five cross ribs leaves four ports, handguard retainer.\n"
-        "handguards: upper and lower wooden shells swept along authored sections rather than plain rounded rectangles, the lower one with flat cheeks carrying a finger groove and a narrowed underside, the upper a rounded trapezoid drawn in toward its crown; they meet at a 1.5 seam that hides the barrel exactly as the reference does, and end in a 14 wide steel retaining band at z 338 to 352, aft of which the receiver front carries the junction down to y 171.\n"
+        "handguards: upper and lower wooden shells swept along authored sections rather than plain rounded rectangles, the lower one with flat cheeks carrying a finger groove and a narrowed underside, the upper a rounded trapezoid drawn in toward its crown; they meet at a 1.5 seam that hides the barrel exactly as the reference does, and end in a 9 wide steel retaining band at z 364 to 373, aft of which the receiver front carries the junction down to y 171.\n"
+        "The lower shell reached only z 340 and left 26 mm of daylight before the receiver, and the upper stopped 2 mm short of the rear sight base and hung clear of everything, both of which review saw as the wood not meeting the metal. The cause was a misread of the measured silhouette: z 336 is where the lower shell's UNDERSIDE stops descending and sweeps up toward the receiver, not where the wood ends. ref_04 puts the end of the wood at 367 and ref_05 at 364, with the band over the joint beyond it.\n"
         "receiver: core at half-width 14.0 with side plates out to 17.2 laid down as panels around two real openings, the milled lightening cut z 380 to 458 on both flanks and, on the right only, the ejection port z 395 to 455 opening into a cavity that shows the bolt carrier plus the separate 7 mm charging-handle track z 455 to 540 cut only through the 3.2 wall; both windows get 5 mm corner fillets and a 2.5 mm 45-degree rim bevel, since 3.2 mm of depth in a 34.4 wide receiver cannot define a pocket on its own. Dust cover swept on a domed section, near-vertical sided with the crown over the top third. Rear sight base tapering in plan with leaf, rails, slider and tangent lever; right-hand selector lever standing 3.3 proud on its pivot boss, charging handle, rivets.\n"
         "magazine: both walls are arcs about a common centre at (z 248, y 202) on the bore line, radius 177.1 front and 236.5 rear, swept from -8 to -57.5 degrees, with five pressed ribs a side and a floorplate.\n"
         "fire_control: trigger guard bow 6.2 deep and 16 wide, swept through six frames so it follows the measured sag from y 135.8 at z 510 to 132.3 at 550 as one continuous contour rather than running as a straight bar, its two webs, the magazine catch, and the wooden pistol grip.\n"
@@ -2317,6 +2336,8 @@ const Scene SCENE = {
         "  trigger: a swept ribbon about 5 wide and 7 to 2.6 thick, hanging from the pin, sweeping down and forward and turning its tip back up into the hook. It was two hexahedra filling the whole triangle between the pin and the guard, which read as a shark fin. The sweep is what makes the hook possible at all: hh is a thickness perpendicular to the path, so one number is a thickness in z while the blade hangs and a thickness in y once the toe has turned forward.\n"
         "  magazine catch: the boss and the catch, which is what the rifle has. The boss is 17 by 21 riveted under the receiver behind the magazine, its roof taken from RecvFloor and buried 1.5 mm up into it rather than typed flat, since that floor drops 1.4 mm across the boss. The catch is 14 mm of plate hanging out of the boss's underside, raked aft and tapering to the tip a thumb pushes.\n"
         "stock: wrist ferrule tapering into the wood, wooden butt swept through seventeen flat-cheeked sections so the comb rise at z 720 to 736 comes out as a curve rather than a step, the last section plane tilted onto the raked butt face so the rake is in the wood and not just the buttplate; left-side sling swivel loop.\n"
+        "The butt's stations are the originals, restored after a re-measurement made them about 20 mm too shallow. The check that settles them needs no render: ref_04's alpha gives a silhouette height of 95.2 at z 800 and 112.0 at z 856, against the 91.0 and 108.5 these nodes give, so they are right to within about 4 mm and if anything a shade shallow.\n"
+        "The same comparison leaves two departures unresolved rather than fixed, both because the two photographs disagree and neither is obviously right. The magazine's leading edge hangs about 18 mm short of ref_04's between z 340 and 380. And ref_04 puts the pistol grip roughly 15 mm aft of where this model has it, while ref_05, measured directly at 4x for the grip rework, put it where it is; they are different rifles and the grip is a wear part, so this is recorded as an open question rather than settled by picking a reference.\n"
         "\n"
         "Surfaces carry procedural diffuse maps, 512x512 images generated at init and shared by every part: wood, milled steel, phosphate grey, blued and brass. Milled steel is generated twice and carried as two materials, MAT_MILLED for the blued receiver and MAT_STEEL for the bare bolt and piston, which differ in colour and not in surface.\n"
         "EVERY METAL FINISH IS ONE COLOUR, which ref_04 shows and which the maps make awkward to write down. Each map is a darkener with a different mean, so equal material colours do not give equal surfaces: the target is one average surface value, blued's 56 through a mean of 0.366 giving 20.9, and each other metal carries 20.9 divided by its own mean, milled 37.5 at 0.557 and phosphate grey 29.2 at 0.715. Equal colours through those means came out two to one apart, which is how the phosphate parts, the sights and trigger group and fittings, ended up the brightest metal on a rifle whose reference has them the same dark as the barrel. BuildTextures measures the means at init rather than trusting a number in a comment, and warns if the finished metals drift more than 15 percent apart; they currently run 20.9 to 21.0.\n"
