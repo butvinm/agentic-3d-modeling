@@ -13,6 +13,23 @@ Find candidate images with WebSearch, then pass the image URLs to the script: it
 
 Get views that answer the questions geometry actually poses: a straight side elevation, a front and rear elevation, and a three-quarter view. A single hero shot will not tell you where a pillar meets a door.
 
+**Prefer the kind of reference that settles the question outright, in this order.** The two sessions that built the current models ran six reference searches between them. Five were phrased for a photograph and restricted to Wikimedia Commons. The sixth went looking for a bolt carrier travel figure, found nothing, and the number in the file has been invented ever since. Neither session searched for a drawing, a manual or a patent at any point.
+
+1. **A dimensioned drawing, or an official specification table.** It gives numbers directly, with no pixels to measure and no scale to establish. `models/ak47.c` still cannot reconcile a 147 mm charging-handle slot with the 72 mm of travel its receiver admits, because no carrier dimension was ever found and the 140 mm length in the file is invented. Military technical manuals, patent drawings (dimensioned, and out of copyright) and parts catalogues with exploded diagrams are the sources nobody here has tried.
+2. **An orthographic elevation.** It settles shape, and it is the only kind that scales honestly. The one clean elevation in this project arrived because the user went and found it, after two of the model's shape claims had already turned out wrong and reached a commit message.
+3. **A cutaway or sectioned view**, whenever something moves inside something else. The rifle searched for one, failed, and the receiver interior was invented.
+4. **Photographs**, to confirm a detail once the shape is settled. They cannot settle it: perspective is against you, and resolution usually is too.
+
+**Delegate the hunt, never the looking.** Finding references is broad search with many dead ends and a small structured result, which is what a subagent is good at. Judging an image is not, and every reference failure here was a failure of looking at an inadequate image, which a prose description of that image would have hidden rather than exposed. Send one agent per reference type rather than one agent for "references", and require each to report, per candidate:
+
+- the direct image URL, and the `references/<model>/ref_NN` path it saved to with `tools/reference.sh`
+- the pixel dimensions, because whether the image can carry a shape claim has to be decidable before anyone spends a look on it
+- which of the four kinds above it is
+- a real dimension visible in it that can set the scale, and the value that dimension is known to have
+- the source page and its licence, for `references/<model>/sources.txt`
+
+Then read the images yourself. An agent that returns descriptions instead of files has done nothing, and an agent's recollection of what a vehicle looks like is worth exactly as much as yours: **never settle a fidelity question from memory** applies to the agent too.
+
 **Check the image can carry the measurement before making it.** Two shape claims here were wrong because they were read off a 406 px wide photograph, which cannot separate a gently steepening curve from a flat panel with a crease in it. Both were corrected by the user, and both had already reached a commit message and a `SCENE.description` by then. Quote the scale in pixels per metre before quoting a dimension, and if it is not enough to resolve the feature, go and find a better view rather than a better adjective.
 
 **Scale a reference by a dimension you trust, then read a second one back to check it.** A side elevation of the truck came out at 403 px/m off the 3.30 m wheelbase, and reading the overall length back gave 4.54 m against a 4.57 m specification, so the scale was known good to under a percent before any claim rested on it. Overlaying a metric grid on the image with PIL and reading coordinates off that beats eyeballing proportions: it is what turned "the hood looks too long" into "1.46 m against the reference's 0.90".
