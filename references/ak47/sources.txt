@@ -1,7 +1,7 @@
-ref_01.png	https://upload.wikimedia.org/wikipedia/commons/6/65/AK-47_type_II_noBG.png
-ref_02.jpg	https://upload.wikimedia.org/wikipedia/commons/5/57/AK-47_type_II_Part_DM-ST-89-01131.jpg
-ref_03.jpg	https://upload.wikimedia.org/wikipedia/commons/1/17/AK-47_1972_001.jpg
-ref_04.jpg	https://upload.wikimedia.org/wikipedia/commons/a/a4/AKMS_and_AK-47_DD-ST-85-01270.jpg
-ref_05.jpg	https://upload.wikimedia.org/wikipedia/commons/a/ab/AK_1_and_2_model.jpg
+ref_01.jpg	https://upload.wikimedia.org/wikipedia/commons/f/fc/AK-Bolt-Carrier-Bolt-and-Gas_piston.jpg
+ref_02.jpg	https://upload.wikimedia.org/wikipedia/commons/2/23/TAPCO_G2_AK-47_Trigger_Group_%26_AK_Hammer.jpg
+ref_03.jpg	https://upload.wikimedia.org/wikipedia/commons/3/30/AK-47_Disassembled.JPG
+ref_04.png	https://upload.wikimedia.org/wikipedia/commons/6/65/AK-47_type_II_noBG.png
+ref_05.jpg	https://upload.wikimedia.org/wikipedia/commons/5/57/AK-47_type_II_Part_DM-ST-89-01131.jpg
 ref_06.jpg	https://upload.wikimedia.org/wikipedia/commons/a/a0/AK47_Receiver.jpg
-ref_07.png	https://upload.wikimedia.org/wikipedia/commons/thumb/e/e1/AK_Kalashnikov_rifle_front_post_identification_guide_cc_BY-SA_4.0_by_Grasyl.svg/1280px-AK_Kalashnikov_rifle_front_post_identification_guide_cc_BY-SA_4.0_by_Grasyl.svg.png
+ref_07.jpg	https://upload.wikimedia.org/wikipedia/commons/a/ab/AK_1_and_2_model.jpg

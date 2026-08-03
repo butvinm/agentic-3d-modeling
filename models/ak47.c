@@ -1,5 +1,6 @@
 #include "harness.h"
 #include "raymath.h"
+#include "rlgl.h"
 
 #include <math.h>
 #include <stdbool.h>
@@ -8,9 +9,11 @@
 // ---------------------------------------------------------------------------
 // Units and frame
 //
-// Every constant below is in millimetres, taken from a measured side elevation (references/ak47/ref_01.png, a 2450x950 background-free photograph of a Type 2 AK-47 whose silhouette was sampled column by column at 0.3915 mm/px).
+// Every constant below is in millimetres, taken from a measured side elevation (references/ak47/ref_04.png, a 2450x950 background-free photograph of a Type 2 AK-47 whose silhouette was sampled column by column at 0.3915 mm/px).
 // z runs aft from the muzzle face, y up from the magazine floorplate, x across.
 // Vert() is the single place where that turns into world space: it scales by UNIT and slides the origin to mid-length, so one world unit is 100 mm and the grid squares read as 10 cm.
+//
+// The rifle is posed: four bodies move, and each is authored about its own pivot instead of being baked into the model frame. gOrigin is subtracted as every vertex is emitted, so a group's vertices come out relative to the point it turns or slides about and its rest pose is the translation back to that point. A static group leaves gOrigin at the model origin and builds in the model frame exactly as it would with no posing at all, which is what lets the seven static parts stay written in the rifle's own measured millimetres.
 // ---------------------------------------------------------------------------
 
 #define UNIT      0.01f
@@ -19,6 +22,18 @@
 #define BORE      204.4f   // barrel axis height
 #define ROD_Y     191.0f   // cleaning rod axis
 #define GAS_Y     228.8f   // gas tube axis
+
+// The gas tube's two ends, named because the piston has to stay between them and reads its rest position off the front one.
+#define GASTUBE_Z0 141.0f
+#define GASTUBE_Z1 326.0f
+
+static Vector3 gOrigin = { 0.0f, 0.0f, Z_ORIGIN };
+
+// Model millimetres to world units. The only place the two frames meet, so a pivot written in millimetres below turns into the translation that places its body.
+static Vector3 ToWorld(Vector3 p)
+{
+    return (Vector3){ p.x * UNIT, p.y * UNIT, (p.z - Z_ORIGIN) * UNIT };
+}
 
 // ---------------------------------------------------------------------------
 // Mesh builder
@@ -30,6 +45,7 @@ typedef struct {
     float *vertices;
     float *normals;
     float *texcoords;
+    unsigned char *colors;
     unsigned short *indices;
     int vertexCount;
     int triangleCount;
@@ -45,6 +61,7 @@ static void Reserve(Builder *b, int verts, int tris)
         b->vertices = (float *)MemRealloc(b->vertices, (size_t)cap * 3 * sizeof(float));
         b->normals = (float *)MemRealloc(b->normals, (size_t)cap * 3 * sizeof(float));
         b->texcoords = (float *)MemRealloc(b->texcoords, (size_t)cap * 2 * sizeof(float));
+        b->colors = (unsigned char *)MemRealloc(b->colors, (size_t)cap * 4 * sizeof(unsigned char));
         b->vertexCap = cap;
     }
     if (b->triangleCount + tris > b->triangleCap) {
@@ -59,14 +76,19 @@ static int Vert(Builder *b, Vector3 p, Vector3 n, Vector2 uv)
 {
     Reserve(b, 1, 0);
     int i = b->vertexCount++;
-    b->vertices[i * 3 + 0] = p.x * UNIT;
-    b->vertices[i * 3 + 1] = p.y * UNIT;
-    b->vertices[i * 3 + 2] = (p.z - Z_ORIGIN) * UNIT;
+    b->vertices[i * 3 + 0] = (p.x - gOrigin.x) * UNIT;
+    b->vertices[i * 3 + 1] = (p.y - gOrigin.y) * UNIT;
+    b->vertices[i * 3 + 2] = (p.z - gOrigin.z) * UNIT;
     b->normals[i * 3 + 0] = n.x;
     b->normals[i * 3 + 1] = n.y;
     b->normals[i * 3 + 2] = n.z;
     b->texcoords[i * 2 + 0] = uv.x;
     b->texcoords[i * 2 + 1] = uv.y;
+    // White until something says otherwise, so every mesh built without a colour ramp is unchanged: both shaders multiply by the vertex colour, and white is the identity.
+    b->colors[i * 4 + 0] = 255;
+    b->colors[i * 4 + 1] = 255;
+    b->colors[i * 4 + 2] = 255;
+    b->colors[i * 4 + 3] = 255;
     return i;
 }
 
@@ -170,6 +192,7 @@ static void MirrorX(Builder *b, Mark m)
         b->normals[d + 2] = b->normals[s + 2];
         b->texcoords[(base + i) * 2 + 0] = b->texcoords[(m.vert + i) * 2 + 0];
         b->texcoords[(base + i) * 2 + 1] = b->texcoords[(m.vert + i) * 2 + 1];
+        for (int c = 0; c < 4; c++) b->colors[(base + i) * 4 + c] = b->colors[(m.vert + i) * 4 + c];
     }
     b->vertexCount += verts;
 
@@ -182,6 +205,30 @@ static void MirrorX(Builder *b, Mark m)
         b->indices[d + 2] = (unsigned short)(b->indices[s + 0] + off);
     }
     b->triangleCount += tris;
+}
+
+// Ramp the vertex colour of everything added since `m` across one axis, between the extremes that range actually reaches.
+// This is how the muzzle flash goes white at the muzzle and orange at its tips, and how a smoke puff is lighter on top, one mesh each. Neither can get that from the lighting shader: the flash is self-luminous and the smoke is transparent, so both are drawn unlit and this is the only shading they have.
+static void ShadeRange(Builder *b, Mark m, int comp, Color lo, Color hi)
+{
+    if (b->vertexCount <= m.vert) return;
+
+    float vmin = b->vertices[m.vert * 3 + comp], vmax = vmin;
+    for (int i = m.vert; i < b->vertexCount; i++) {
+        float v = b->vertices[i * 3 + comp];
+        if (v < vmin) vmin = v;
+        if (v > vmax) vmax = v;
+    }
+    float span = vmax - vmin;
+    if (span < 1e-9f) span = 1.0f;
+
+    for (int i = m.vert; i < b->vertexCount; i++) {
+        float t = (b->vertices[i * 3 + comp] - vmin) / span;
+        b->colors[i * 4 + 0] = (unsigned char)((float)lo.r + ((float)hi.r - (float)lo.r) * t);
+        b->colors[i * 4 + 1] = (unsigned char)((float)lo.g + ((float)hi.g - (float)lo.g) * t);
+        b->colors[i * 4 + 2] = (unsigned char)((float)lo.b + ((float)hi.b - (float)lo.b) * t);
+        b->colors[i * 4 + 3] = (unsigned char)((float)lo.a + ((float)hi.a - (float)lo.a) * t);
+    }
 }
 
 // Cylinder or cone frustum from a to b, smooth around its circumference.
@@ -418,7 +465,7 @@ static void WireLoop(Builder *b, float px, float cz, float cy, float rz, float r
 // ---------------------------------------------------------------------------
 
 typedef enum {
-    MAT_WOOD, MAT_STEEL, MAT_GREY, MAT_BLUED, MAT_COUNT
+    MAT_WOOD, MAT_STEEL, MAT_GREY, MAT_BLUED, MAT_BRASS, MAT_COUNT
 } MatId;
 
 // lighting.fs gamma-corrects with pow(c, 1/2.2), so these read considerably lighter than the raw values once shaded.
@@ -428,15 +475,17 @@ static const Color MAT_COLOR[MAT_COUNT] = {
     [MAT_STEEL] = { 140, 144, 152, 255 },
     [MAT_GREY]  = {  78,  80,  86, 255 },
     [MAT_BLUED] = {  56,  56,  60, 255 },
+    [MAT_BRASS] = { 168, 128,  48, 255 },
 };
 
 // Millimetres covered by one texture repeat, along the part (u) and across it (v).
-// Wood is the anisotropic one, and the v figure is the number that matters: on a swept part v is the section perimeter, so the handguard's 130 mm girth wraps the map most of the way round. At 145 mm the 22 latewood lines the map carries land about 6.6 mm apart and about eighteen of them go round the handguard, which is what references/ak47/ref_02.jpg shows. An earlier 78 mm put nearly forty round it and the wood read as corrugation.
+// Wood is the anisotropic one, and the v figure is the number that matters: on a swept part v is the section perimeter, so the handguard's 130 mm girth wraps the map most of the way round. At 145 mm the 22 latewood lines the map carries land about 6.6 mm apart and about eighteen of them go round the handguard, which is what references/ak47/ref_05.jpg shows. An earlier 78 mm put nearly forty round it and the wood read as corrugation.
 static const Vector2 MAT_REPEAT[MAT_COUNT] = {
     [MAT_WOOD]  = { 320.0f, 145.0f },
     [MAT_STEEL] = { 165.0f,  95.0f },
     [MAT_GREY]  = {  62.0f,  62.0f },
     [MAT_BLUED] = { 128.0f,  96.0f },
+    [MAT_BRASS] = {  26.0f,  18.0f },
 };
 
 // ---------------------------------------------------------------------------
@@ -505,7 +554,7 @@ static Color WoodPixel(float m)
     return (Color){ Chan(m), Chan(m * (1.0f - 0.55f * d)), Chan(m * (1.0f - 0.95f * d)), 255 };
 }
 
-// Beech stock and handguards: long latewood lines running along u, broad tonal blotches, and the occasional near-black mineral streak that both ref_01 and ref_05 show on the butt.
+// Beech stock and handguards: long latewood lines running along u, broad tonal blotches, and the occasional near-black mineral streak that both ref_04 and ref_07 show on the butt.
 static Image WoodImage(void)
 {
     Image img = GenImageColor(TEX_SIZE, TEX_SIZE, WHITE);
@@ -541,7 +590,7 @@ static Image WoodImage(void)
 }
 
 // Milled receiver: draw-marks along the length, a broad polish sweep on the high spots and a cooler patina in the hollows.
-// ref_01 shows this as worn bright steel, not as a black finish.
+// ref_04 shows this as worn bright steel, not as a black finish.
 static Image SteelImage(void)
 {
     Image img = GenImageColor(TEX_SIZE, TEX_SIZE, WHITE);
@@ -589,7 +638,7 @@ static Image GreyImage(void)
     return img;
 }
 
-// Blued barrel and magazine: a smooth dark finish with faint polishing streaks, plus the plum-brown thinning along the high spots that ref_01 and ref_02 both show on the magazine ribs.
+// Blued barrel and magazine: a smooth dark finish with faint polishing streaks, plus the plum-brown thinning along the high spots that ref_04 and ref_05 both show on the magazine ribs.
 static Image BluedImage(void)
 {
     Image img = GenImageColor(TEX_SIZE, TEX_SIZE, WHITE);
@@ -611,6 +660,27 @@ static Image BluedImage(void)
     return img;
 }
 
+// Fired cartridge case: drawn brass, so the marks run around the case rather than along it. The repeat is the smallest of the five at 26 by 18 mm, because the case is 38.7 mm long and a map sized for a buttstock would put a quarter of one repeat on the whole part and read as a flat colour.
+static Image BrassImage(void)
+{
+    Image img = GenImageColor(TEX_SIZE, TEX_SIZE, WHITE);
+    Color *px = (Color *)img.data;
+    for (int y = 0; y < TEX_SIZE; y++) {
+        float v = (float)y / (float)TEX_SIZE;
+        for (int x = 0; x < TEX_SIZE; x++) {
+            float u = (float)x / (float)TEX_SIZE;
+
+            float draw = Fbm(u, v, 30, 3, 401, 4);
+            float tarnish = Fbm(u, v, 3, 3, 409, 4);
+            float soot = Sstep(0.62f, 0.92f, Fbm(u, v, 5, 5, 419, 4));
+
+            float m = 0.78f + 0.16f * (draw - 0.5f) + 0.20f * (tarnish - 0.5f) - 0.30f * soot;
+            px[y * TEX_SIZE + x] = (Color){ Chan(m), Chan(m * (1.0f - 0.10f * soot)), Chan(m * (1.0f - 0.26f * soot)), 255 };
+        }
+    }
+    return img;
+}
+
 static Texture2D gTex[MAT_COUNT];
 static bool gTexReady;
 
@@ -621,6 +691,7 @@ static void BuildTextures(void)
     img[MAT_STEEL] = SteelImage();
     img[MAT_GREY] = GreyImage();
     img[MAT_BLUED] = BluedImage();
+    img[MAT_BRASS] = BrassImage();
 
     for (int m = 0; m < MAT_COUNT; m++) {
         gTex[m] = LoadTextureFromImage(img[m]);
@@ -640,12 +711,31 @@ static void UnloadTextures(void)
     gTexReady = false;
 }
 
+// A group is one rigid body. `pivot` is the point in model millimetres its geometry is authored about, and `xform` is where that body currently is; the four that move rebuild xform every frame in Update and nothing about them is baked into world coordinates.
 typedef struct {
+    const char *name;
+    Vector3 pivot;
     Builder b[MAT_COUNT];
     Model model[MAT_COUNT];
     bool has[MAT_COUNT];
-    BoundingBox bounds;
+    BoundingBox local;   // in the group's own frame, from the built mesh
+    BoundingBox swept;   // the union of local over one cycle, in world space
+    Matrix xform;
 } Group;
+
+// Everything emitted after this call is authored about `pivot`, until the next call names a different one.
+static void GroupOrigin(Group *g, Vector3 pivot)
+{
+    g->pivot = pivot;
+    gOrigin = pivot;
+}
+
+// The pose that puts a group exactly where the model frame draws it, which is its rest pose.
+static Matrix GroupRest(const Group *g)
+{
+    Vector3 w = ToWorld(g->pivot);
+    return MatrixTranslate(w.x, w.y, w.z);
+}
 
 typedef struct {
     Mark m[MAT_COUNT];
@@ -669,6 +759,7 @@ static void GroupMirrorX(Group *g, GroupMark gm)
 static void GroupFinish(Group *g, const char *name)
 {
     bool any = false;
+    g->name = name;
     for (int m = 0; m < MAT_COUNT; m++) {
         Builder *b = &g->b[m];
         if (b->vertexCount == 0) continue;
@@ -689,6 +780,7 @@ static void GroupFinish(Group *g, const char *name)
         mesh.vertices = b->vertices;
         mesh.normals = b->normals;
         mesh.texcoords = b->texcoords;
+        mesh.colors = b->colors;
         mesh.indices = b->indices;
         UploadMesh(&mesh, false);
 
@@ -700,19 +792,49 @@ static void GroupFinish(Group *g, const char *name)
 
         BoundingBox bb = GetModelBoundingBox(g->model[m]);
         if (!any) {
-            g->bounds = bb;
+            g->local = bb;
             any = true;
         } else {
-            g->bounds.min = Vector3Min(g->bounds.min, bb.min);
-            g->bounds.max = Vector3Max(g->bounds.max, bb.max);
+            g->local.min = Vector3Min(g->local.min, bb.min);
+            g->local.max = Vector3Max(g->local.max, bb.max);
         }
     }
+    g->xform = GroupRest(g);
+    g->swept = g->local;
 }
 
-static void GroupDraw(const Group *g)
+// A model that is deliberately NOT given the lighting shader, and therefore renders flat at exactly the colour it carries.
+//
+// CLAUDE.md warns that forgetting HarnessApplyLighting leaves a mesh as a flat unlit silhouette and makes the review loop worthless. That is a warning about doing it by accident. Doing it on purpose is the only way this file has to express two things the lighting shader cannot:
+//   self-luminous. A muzzle flash emits; nothing in lighting.fs adds emission, so a lit flash is a yellow plastic cone that gets darker away from the key light.
+//   transparent. lighting.fs:73 computes finalColor as texelColor*((tint + vec4(specular, 1.0))*vec4(lightDot, 1.0)), whose alpha is texelColor.a*(tint.a + 1.0). That is at or above 1.0 for every tint alpha, so the lighting shader cannot carry transparency at all. raylib's default shader is finalColor = texelColor*colDiffuse*fragColor, which does.
+// Both shaders declare vertexColor and pass it to fragColor, so a single unlit mesh can still vary across itself; ShadeRange is what puts the shading in.
+static Model FinishUnlit(Builder *b, const char *name)
+{
+    if (b->vertexCount > 65535) {
+        TraceLog(LOG_ERROR, "%s: %d vertices, over the 65535 index limit", name, b->vertexCount);
+    }
+
+    Mesh mesh = { 0 };
+    mesh.vertexCount = b->vertexCount;
+    mesh.triangleCount = b->triangleCount;
+    mesh.vertices = b->vertices;
+    mesh.normals = b->normals;
+    mesh.texcoords = b->texcoords;
+    mesh.colors = b->colors;
+    mesh.indices = b->indices;
+    UploadMesh(&mesh, false);
+
+    return LoadModelFromMesh(mesh);
+}
+
+// DrawModel composes an identity onto model.transform, so the pose passes through untouched.
+static void GroupDraw(Group *g)
 {
     for (int m = 0; m < MAT_COUNT; m++) {
-        if (g->has[m]) DrawModel(g->model[m], Vector3Zero(), 1.0f, WHITE);
+        if (!g->has[m]) continue;
+        g->model[m].transform = g->xform;
+        DrawModel(g->model[m], Vector3Zero(), 1.0f, WHITE);
     }
 }
 
@@ -724,6 +846,10 @@ static void GroupUnload(Group *g)
 }
 
 static Group gSight, gBarrel, gWood, gRecv, gMag, gFire, gStock;
+static Group gCarrier, gTrigger, gCase;
+
+// The seven groups above never move, so their own frame is the model frame.
+#define STATIC_ORIGIN ((Vector3){ 0.0f, 0.0f, Z_ORIGIN })
 
 // ---------------------------------------------------------------------------
 // Front sight assembly, z 0 to 46
@@ -731,6 +857,7 @@ static Group gSight, gBarrel, gWood, gRecv, gMag, gFire, gStock;
 
 static void BuildSight(void)
 {
+    GroupOrigin(&gSight, STATIC_ORIGIN);
     Builder *s = &gSight.b[MAT_BLUED];
 
     Tube(s, (Vector3){ 0, BORE, 0.0f }, (Vector3){ 0, BORE, 13.0f }, 7.5f, 7.5f, 30, true, true);
@@ -766,6 +893,7 @@ static void BuildSight(void)
 
 static void BuildBarrel(void)
 {
+    GroupOrigin(&gBarrel, STATIC_ORIGIN);
     Builder *s = &gBarrel.b[MAT_BLUED];
     Builder *m = &gBarrel.b[MAT_GREY];
 
@@ -787,9 +915,9 @@ static void BuildBarrel(void)
     };
     Hex(s, riser);
 
-    Tube(s, (Vector3){ 0, GAS_Y, 141.0f }, (Vector3){ 0, GAS_Y, 152.0f }, 9.2f, 9.2f, 28, true, false);
+    Tube(s, (Vector3){ 0, GAS_Y, GASTUBE_Z0 }, (Vector3){ 0, GAS_Y, 152.0f }, 9.2f, 9.2f, 28, true, false);
     Tube(s, (Vector3){ 0, GAS_Y, 152.0f }, (Vector3){ 0, GAS_Y, 206.0f }, 8.0f, 8.0f, 28, false, false);
-    Tube(s, (Vector3){ 0, GAS_Y, 206.0f }, (Vector3){ 0, GAS_Y, 326.0f }, 9.2f, 9.2f, 28, false, true);
+    Tube(s, (Vector3){ 0, GAS_Y, 206.0f }, (Vector3){ 0, GAS_Y, GASTUBE_Z1 }, 9.2f, 9.2f, 28, false, true);
 
     // Slotted panel on top of the gas tube: a dark floor framed by two rails and five cross ribs, leaving the four ports the reference shows.
     Box(s, -5.0f, 5.0f, 234.0f, 236.4f, 152.0f, 206.0f);
@@ -810,6 +938,7 @@ static void BuildBarrel(void)
 
 static void BuildWood(void)
 {
+    GroupOrigin(&gWood, STATIC_ORIGIN);
     Builder *w = &gWood.b[MAT_WOOD];
     Builder *s = &gWood.b[MAT_BLUED];
 
@@ -862,6 +991,66 @@ static void BuildWood(void)
 #define RCV_Z0     372.0f
 #define RCV_Z1     620.0f
 
+// A receiver that is a solid billet with two windows milled into it is enough while nothing behind them moves. Here the ejection port has to open into somewhere, so the core is cut back to a channel: a base slab under it, a full-height wall on each flank, and a rear wall the carrier stops against. The channel is what the port and the charging-handle slot now look into.
+#define CHAN_HW    11.5f    // channel half-width, 0.5 mm clear of the carrier
+#define CHAN_Y0    196.0f   // channel floor, 1.0 mm under the bolt
+#define CHAN_Z1    600.0f   // channel rear wall, 6 mm ahead of the stock tang
+
+// ---------------------------------------------------------------------------
+// The four pivots
+//
+// Every posed body reads its pivot from here and nowhere else, and the parts that have to agree with a pivot (the trigger pin head on the receiver flank, the charging handle's rest position against its slot) read it from here too. That is the one rule this project has paid for four times over: a child written as an absolute coordinate stops agreeing with its parent the moment anyone edits the parent.
+// ---------------------------------------------------------------------------
+
+#define CAR_Z0     380.0f   // bolt carrier front face, in battery
+#define CAR_L      140.0f   // carrier body length
+#define CAR_HW     11.0f
+#define CAR_Y0     211.0f   // carrier body underside, on top of the bolt
+#define CAR_Y1     226.0f   // carrier body top, 1 mm under the dust cover floor
+#define BOLT_R       7.4f
+#define HAND_Z0    383.0f   // charging handle stem, 3 mm behind the slot's front stop
+#define HAND_Z1    393.0f
+
+#define TRIG_PIVOT_Y 174.0f
+#define TRIG_PIVOT_Z 550.0f
+#define TRIG_PULL     9.0f  // degrees; about 5 mm at the shoe
+
+// ---------------------------------------------------------------------------
+// Recoil
+//
+// Derived, not styled. The AK-47 specification gives a 7.9 g M43 bullet at 715 m/s and a 4.39 kg rifle with a loaded 30-round magazine, which is the configuration this model shows. Conservation of momentum fixes the recoil velocity at 7.9e-3 * 715 / 4.39 = 1.29 m/s.
+// The propellant gas is left out. It adds roughly a third again to the impulse in ordinary free-recoil practice, but no reference consulted gives a charge mass for 7.62x39, and inventing one to make the recoil larger is exactly the move this project has been caught making before.
+//
+// Muzzle rise falls out of the same impulse. The recoil acts along the bore axis at y 204.4 and is resisted at the shoulder, which the buttplate centre puts at y 121.0: an 83.4 mm moment arm. The angular impulse about that point is 5.65 * 0.0834 = 0.471 N m s, against an inertia of about 0.81 kg m^2 for a 4.39 kg rifle whose centre of mass sits roughly 350 mm ahead of the butt, giving 0.58 rad/s.
+//
+// The shoulder is the one quantity here that is chosen rather than derived: it is modelled as absorbing the recoil and returning the rifle to battery over RECOIL_T, as a half sine whose initial slope is the velocity above. Peak travel is therefore v * RECOIL_T / pi, and CheckAction reports what that comes to.
+//
+// The result is small, and that is the answer rather than a shortfall: one shot from a 4.4 kg rifle shifts it about 25 mm and turns it about two thirds of a degree within a cycle. It reads by comparing the muzzle between frames, not at a glance. Anything larger would be a decision to exaggerate, and this file does not take it.
+// ---------------------------------------------------------------------------
+
+#define BULLET_M     0.0079f   // kg
+#define BULLET_V     715.0f    // m/s
+#define RIFLE_M      4.39f     // kg, loaded
+#define RIFLE_I      0.81f     // kg m^2 about the shoulder
+#define SHOULDER_Y   121.0f    // buttplate centre, from the last stock section
+#define SHOULDER_Z   867.5f
+
+// ---------------------------------------------------------------------------
+// The burst
+//
+// Three rounds at the AK-47's 600 rpm cyclic rate: one action cycle is 0.100 s of real time and the burst is 0.300 s. The cycle runs five shot periods so the last round has somewhere to finish and the loop has a pause in it, and every ignition therefore falls on a fifth of the cycle, at phases 0, 0.2 and 0.4.
+// That is not tidiness. A muzzle flash lasts about 3 ms, under one percent of this cycle, so no evenly spaced set of frames catches one by luck: any --frames that is a multiple of 5 lands on all three ignitions, --frames 15 is the useful default, and --frames 8 will show only the first.
+// ---------------------------------------------------------------------------
+
+#define SHOTS        3
+#define SHOT_T       0.100f    // real seconds for one action cycle, at 600 rpm
+#define BURST_T      (SHOTS * SHOT_T)
+#define TOTAL_T      0.500f    // five shot periods: three firing, two of pause
+// SLOWDOWN is the ONLY thing in this file that is about playback rather than about the rifle. Everything else is computed in real seconds, so this scales what the interactive window and SCENE.duration do and nothing else: --anim samples N evenly spaced phases of the cycle, so the rendered frames come out identical whatever this is set to. To play those frames back at real speed, run them at N / TOTAL_T fps, which is 30 fps for --frames 15.
+// At 16 the burst read as a slow-motion replay, and at 4 and at 2.5 it still did. At 1 it is real time: a whole shot is six frames at 60 Hz and the carrier's stroke is two of them, which is the point, since nothing slower is what the rifle does.
+#define SLOWDOWN     1.0f
+#define CYCLE        (TOTAL_T * SLOWDOWN)   // 0.5 s of playback for the whole burst
+
 // Receiver floor line, measured off the elevation: it drops fastest over the magazine well.
 static float RecvFloor(float z)
 {
@@ -913,7 +1102,9 @@ static void SidePlate(Builder *b, float x0, float x1, bool withPort)
     if (withPort) {
         WindowFillets(b, x0, x1, PORT_Z0, PORT_Z1, PORT_Y0, RCV_TOP, 5.0f);
         BevelWindow(b, sgn, RCV_CORE, RCV_SIDE, PORT_Z0 + 2.5f, PORT_Z1 - 2.5f, PORT_Y0 + 2.5f, RCV_TOP, 2.5f);
-        Box(b, x0, x1, CUT_Y1, RCV_TOP, CUT_Z0, PORT_Z0);
+        // With a fixed handle this stretch of plate stays solid and the charging handle sits on top of it. The handle now travels, so the slot has to run from the receiver's front face all the way aft: this is the span forward of the ejection port, split above and below the slot.
+        Box(b, x0, x1, CUT_Y1, TRACK_Y0, CUT_Z0, PORT_Z0);
+        Box(b, x0, x1, TRACK_Y1, RCV_TOP, CUT_Z0, PORT_Z0);
         Box(b, x0, x1, CUT_Y1, PORT_Y0, PORT_Z0, PORT_Z1);
         Box(b, x0, x1, CUT_Y1, TRACK_Y0, PORT_Z1, TRACK_Z1);
         Box(b, x0, x1, TRACK_Y1, RCV_TOP, PORT_Z1, TRACK_Z1);
@@ -927,13 +1118,32 @@ static void SidePlate(Builder *b, float x0, float x1, bool withPort)
 
 static void BuildRecv(void)
 {
+    GroupOrigin(&gRecv, STATIC_ORIGIN);
     Builder *m = &gRecv.b[MAT_STEEL];
     Builder *s = &gRecv.b[MAT_GREY];
 
-    Prism(m, -RCV_CORE, RCV_CORE, RCV_Z0, PORT_Z0, RecvFloor(RCV_Z0), RecvFloor(PORT_Z0), RCV_TOP, RCV_TOP);
-    Prism(m, -RCV_CORE, RCV_CORE, PORT_Z0, PORT_Z1, RecvFloor(PORT_Z0), RecvFloor(PORT_Z1), PORT_Y0, PORT_Y0);
-    Prism(m, -RCV_CORE, RCV_CORE, PORT_Z1, RCV_Z1, RecvFloor(PORT_Z1), RecvFloor(RCV_Z1), RCV_TOP, RCV_TOP);
-    Box(&gRecv.b[MAT_BLUED], -9.5f, 9.5f, PORT_Y0, RCV_TOP, PORT_Z0, PORT_Z1);
+    // Base slab under the carrier channel.
+    Prism(m, -CHAN_HW, CHAN_HW, RCV_Z0, RCV_Z1, RecvFloor(RCV_Z0), RecvFloor(RCV_Z1), CHAN_Y0, CHAN_Y0);
+    // Flank walls, taken to full height so the milled lightening cut on either side still has a floor to be milled into.
+    Prism(m, -RCV_CORE, -CHAN_HW, RCV_Z0, RCV_Z1, RecvFloor(RCV_Z0), RecvFloor(RCV_Z1), RCV_TOP, RCV_TOP);
+    // Right wall. The charging-handle slot is cut through this as well as through the outer plate: the stem crosses 2.5 mm of core before it reaches the plate, and cutting only the plate leaves it travelling through solid steel.
+    Prism(m, CHAN_HW, RCV_CORE, RCV_Z0, CUT_Z0, RecvFloor(RCV_Z0), RecvFloor(CUT_Z0), RCV_TOP, RCV_TOP);
+    Prism(m, CHAN_HW, RCV_CORE, CUT_Z0, PORT_Z0, RecvFloor(CUT_Z0), RecvFloor(PORT_Z0), TRACK_Y0, TRACK_Y0);
+    Box(m, CHAN_HW, RCV_CORE, TRACK_Y1, RCV_TOP, CUT_Z0, PORT_Z0);
+    // Over the ejection port the wall drops to the sill, which is what turns the port from a recess into a hole through into the channel.
+    Prism(m, CHAN_HW, RCV_CORE, PORT_Z0, PORT_Z1, RecvFloor(PORT_Z0), RecvFloor(PORT_Z1), PORT_Y0, PORT_Y0);
+    Prism(m, CHAN_HW, RCV_CORE, PORT_Z1, TRACK_Z1, RecvFloor(PORT_Z1), RecvFloor(TRACK_Z1), TRACK_Y0, TRACK_Y0);
+    Box(m, CHAN_HW, RCV_CORE, TRACK_Y1, RCV_TOP, PORT_Z1, TRACK_Z1);
+    Prism(m, CHAN_HW, RCV_CORE, TRACK_Z1, RCV_Z1, RecvFloor(TRACK_Z1), RecvFloor(RCV_Z1), RCV_TOP, RCV_TOP);
+    // Rear wall: the surface the carrier runs back against, and therefore the thing that sets the travel.
+    Box(m, -CHAN_HW, CHAN_HW, CHAN_Y0, RCV_TOP, CHAN_Z1, RCV_Z1);
+
+    // The channel interior is finished dark, which is both true of a receiver and the only thing that made the carrier's travel legible. Four review rounds running reported the ejection port as a barely changing recess: bare milled walls, a blued carrier and a bright wear patch on it are all mid greys at this camera distance, so nothing in the opening changed value as the carrier ran. A dark background behind a bright moving face does.
+    // Only the left wall, the floor and the rear wall are lined. They are what you see THROUGH the port; the right wall is the one with the hole in it. Each liner is buried into the wall behind it rather than laid on its face, so no two surfaces are coincident.
+    Builder *d = &gRecv.b[MAT_BLUED];
+    Box(d, -CHAN_HW - 0.6f, -CHAN_HW + 0.25f, CHAN_Y0, RCV_TOP, RCV_Z0, CHAN_Z1);
+    Box(d, -CHAN_HW, CHAN_HW, CHAN_Y0 - 0.6f, CHAN_Y0 + 0.25f, RCV_Z0, CHAN_Z1);
+    Box(d, -CHAN_HW, CHAN_HW, CHAN_Y0, RCV_TOP, CHAN_Z1 - 0.25f, CHAN_Z1 + 0.6f);
     Prism(m, -RCV_SIDE, RCV_SIDE, 350.0f, 380.0f, 171.0f, 174.0f, 232.0f, 232.0f);
     SidePlate(m, RCV_CORE, RCV_SIDE, true);
     SidePlate(m, -RCV_SIDE, -RCV_CORE, false);
@@ -977,13 +1187,14 @@ static void BuildRecv(void)
     Tube(m, (Vector3){ RCV_SIDE, 197.5f, 555.0f }, (Vector3){ 21.5f, 197.5f, 555.0f }, 6.5f, 5.0f, 16, false, true);
     Box(m, RCV_SIDE, 20.5f, 197.5f, 214.0f, 555.0f, 567.0f);
 
-    Box(&gRecv.b[MAT_BLUED], 12.0f, 19.0f, 214.0f, 227.0f, 382.0f, 394.0f);
-    Tube(&gRecv.b[MAT_BLUED], (Vector3){ 17.0f, 221.0f, 388.0f }, (Vector3){ 30.0f, 221.0f, 388.0f }, 4.8f, 4.0f, 20, false, true);
+    // The charging handle has moved to the bolt carrier group, which is the body it is actually part of.
 
     GroupMark gm = GroupMarkNow(&gRecv);
     Tube(m, (Vector3){ RCV_SIDE, 177.0f, 491.0f }, (Vector3){ 18.4f, 177.0f, 491.0f }, 2.2f, 1.8f, 10, false, true);
     Tube(m, (Vector3){ RCV_SIDE, 177.0f, 502.0f }, (Vector3){ 18.4f, 177.0f, 502.0f }, 2.2f, 1.8f, 10, false, true);
     Tube(m, (Vector3){ RCV_SIDE, 214.0f, 596.0f }, (Vector3){ 18.4f, 214.0f, 596.0f }, 2.2f, 1.8f, 10, false, true);
+    // Trigger pin head. A fixed trigger has no reason to show where it hangs from; a swinging one does, and the head is drawn from TRIG_PIVOT rather than from a copy of its coordinates.
+    Tube(m, (Vector3){ RCV_SIDE, TRIG_PIVOT_Y, TRIG_PIVOT_Z }, (Vector3){ 18.6f, TRIG_PIVOT_Y, TRIG_PIVOT_Z }, 3.0f, 2.6f, 12, false, true);
     GroupMirrorX(&gRecv, gm);
 }
 
@@ -1013,6 +1224,7 @@ static void MagFrames(Frame *fr, int n, float th0, float th1, float rMid, float 
 
 static void BuildMag(void)
 {
+    GroupOrigin(&gMag, STATIC_ORIGIN);
     Builder *s = &gMag.b[MAT_BLUED];
 
     Vector2 sect[SECT_MAX];
@@ -1045,6 +1257,7 @@ static void BuildMag(void)
 
 static void BuildFire(void)
 {
+    GroupOrigin(&gFire, STATIC_ORIGIN);
     Builder *s = &gFire.b[MAT_GREY];
     Builder *w = &gFire.b[MAT_WOOD];
 
@@ -1062,11 +1275,7 @@ static void BuildFire(void)
     Prism(s, -8.0f, 8.0f, 558.0f, 570.0f, 133.4f, 133.4f, 139.0f, 172.0f);
     Box(s, -6.0f, 6.0f, 130.0f, 152.0f, 492.0f, 502.0f);
 
-    Vector3 trig[8] = {
-        { -2.5f, 140.0f, 531.0f }, { 2.5f, 140.0f, 531.0f }, { 2.5f, 152.0f, 549.0f }, { -2.5f, 152.0f, 549.0f },
-        { -2.5f, 150.0f, 531.0f }, { 2.5f, 150.0f, 531.0f }, { 2.5f, 172.0f, 549.0f }, { -2.5f, 172.0f, 549.0f },
-    };
-    Hex(s, trig);
+    // The trigger has moved to its own group: it swings, so it cannot share a mesh with the guard it swings inside.
 
     Vector2 sect[SECT_MAX];
     Frame fr[6];
@@ -1088,6 +1297,7 @@ static void BuildFire(void)
 
 static void BuildStock(void)
 {
+    GroupOrigin(&gStock, STATIC_ORIGIN);
     Builder *w = &gStock.b[MAT_WOOD];
     Builder *m = &gStock.b[MAT_GREY];
     Builder *s = &gStock.b[MAT_GREY];
@@ -1143,6 +1353,580 @@ static void BuildStock(void)
 }
 
 // ---------------------------------------------------------------------------
+// Bolt carrier group: carrier body, bolt, gas piston and charging handle
+//
+// One rigid body and therefore one mesh: the charging handle is part of the carrier on the real rifle, and making it a separate group would let the two disagree. Its local origin is the carrier's front face on the gas-tube axis, so the pose is a bare translation aft and the travel is exactly the number CheckAction reads back.
+//
+// The piston rod runs forward at GAS_Y and so passes through the rear sight base, the receiver front and the upper handguard, none of which is bored. That is the convention the static geometry already works to: the gas tube sits wholly inside the solid swept handguard wood, because the wood is a solid section and not a shell. Nothing here is visible from outside, and the alternative is boring four measured solids to hide a part no assembled view ever shows.
+// ---------------------------------------------------------------------------
+
+static void BuildCarrier(void)
+{
+    GroupOrigin(&gCarrier, (Vector3){ 0.0f, GAS_Y, CAR_Z0 });
+    Builder *s = &gCarrier.b[MAT_BLUED];
+    Builder *b = &gCarrier.b[MAT_STEEL];
+
+    // The carrier is blued, as references/ak47/ref_01.jpg and ref_03.jpg both show it, and the channel it runs in is bare milled steel. That contrast is the whole of what the ejection port has to show: a bright carrier in a bright channel changes nothing visible as it travels, which is what a first attempt at this looked like.
+    // Carrier body, and a skirt dropping alongside the bolt over the rear third, which is the stepped profile ref_03 shows.
+    Box(s, -CAR_HW, CAR_HW, CAR_Y0, CAR_Y1, CAR_Z0, CAR_Z0 + CAR_L);
+    Box(s, -CAR_HW, CAR_HW, BORE - BOLT_R - 0.4f, CAR_Y0, CAR_Z0 + 90.0f, CAR_Z0 + CAR_L);
+
+    // Bolt, protruding forward of the carrier: in battery that puts its head in the chamber, and at full travel it is the part the ejection port shows moving.
+    Tube(b, (Vector3){ 0.0f, BORE, CAR_Z0 - 14.0f }, (Vector3){ 0.0f, BORE, CAR_Z0 + 92.0f }, BOLT_R, BOLT_R, 26, true, true);
+    for (int k = 0; k < 2; k++) {
+        float a = (k == 0) ? 40.0f : -40.0f;
+        Vector3 lug = { BOLT_R * cosf(a * DEG2RAD), BORE + BOLT_R * sinf(a * DEG2RAD), CAR_Z0 - 10.0f };
+        Tube(b, lug, (Vector3){ lug.x * 1.28f, BORE + (lug.y - BORE) * 1.28f, CAR_Z0 - 2.0f }, 3.0f, 3.0f, 10, false, true);
+    }
+
+    // A bright bare-steel wear patch on the carrier's right flank, standing 0.15 proud of it and 0.35 clear of the channel wall.
+    // The carrier, the channel it runs in and the slot above it are all dark and all much the same dark, so the carrier body is hard to follow through the port however far it travels: three review rounds reported the port as an unchanging recess. A moving body needs a feature that changes value as it travels, or the motion is invisible however far it goes: a uniform surface sliding behind a uniform opening tells a reviewer nothing about which frame is which. It is also where a carrier actually wears bright, on the flank that rides the rail.
+    // Taken as tall as the port opening and as far outboard as the channel allows, because a smaller one did not carry: at 11 mm tall and 0.65 proud it was still read as an unchanging dark recess. The carrier only ever slides along z, so the 0.3 mm side clearance never closes.
+    Box(b, CAR_HW - 0.5f, CAR_HW + 0.2f, PORT_Y0 + 0.5f, CAR_Y1 - 0.8f, CAR_Z0 + 4.0f, CAR_Z0 + 56.0f);
+
+    // Charging handle: a stem sized to the slot it runs in, then the knob outboard of the plate.
+    Box(s, 6.0f, RCV_SIDE + 0.4f, TRACK_Y0 + 0.5f, TRACK_Y1 - 0.5f, HAND_Z0, HAND_Z1);
+    Box(s, RCV_SIDE + 0.4f, 21.5f, 214.0f, 227.0f, HAND_Z0 - 2.0f, HAND_Z1 + 2.0f);
+    Tube(s, (Vector3){ 21.5f, 220.5f, 388.0f }, (Vector3){ 30.0f, 220.5f, 388.0f }, 4.8f, 4.0f, 20, false, true);
+
+    // Gas piston. The head has to stay inside the gas tube at BOTH ends of the travel, and its rest position is set from the tube's front cap rather than typed: at z 118 to 142 it stood 23 mm out in the open ahead of the tube whenever the carrier was forward, covered only by a gas-block riser that is both shorter and narrower than it, and it withdrew out of sight as the carrier ran back. On the real rifle the head sits in the gas block's cylinder at rest, but this model's gas block is not bored, so the nearest honest place for it is just inside the tube's mouth.
+    Tube(b, (Vector3){ 0.0f, GAS_Y, GASTUBE_Z0 + 29.0f }, (Vector3){ 0.0f, GAS_Y, CAR_Z0 + 8.0f }, 4.0f, 4.0f, 16, false, false);
+    Tube(b, (Vector3){ 0.0f, GAS_Y, GASTUBE_Z0 + 5.0f }, (Vector3){ 0.0f, GAS_Y, GASTUBE_Z0 + 29.0f }, 7.5f, 7.5f, 22, true, true);
+}
+
+// ---------------------------------------------------------------------------
+// Trigger: local origin ON the pin it swings about, so the pose is a bare rotation about local x and the pin head on the receiver flank is drawn from the same two numbers.
+// ---------------------------------------------------------------------------
+
+static void BuildTrigger(void)
+{
+    GroupOrigin(&gTrigger, (Vector3){ 0.0f, TRIG_PIVOT_Y, TRIG_PIVOT_Z });
+    Builder *s = &gTrigger.b[MAT_GREY];
+
+    Vector3 trig[8] = {
+        { -2.5f, 140.0f, 531.0f }, { 2.5f, 140.0f, 531.0f }, { 2.5f, 152.0f, 549.0f }, { -2.5f, 152.0f, 549.0f },
+        { -2.5f, 150.0f, 531.0f }, { 2.5f, 150.0f, 531.0f }, { 2.5f, 172.0f, 549.0f }, { -2.5f, 172.0f, 549.0f },
+    };
+    Hex(s, trig);
+
+    // Body up to the pin, so the blade hangs off something rather than floating below its own pivot.
+    Vector3 body[8] = {
+        { -2.5f, 152.0f, 545.0f }, { 2.5f, 152.0f, 545.0f }, { 2.5f, 152.0f, 556.0f }, { -2.5f, 152.0f, 556.0f },
+        { -2.5f, TRIG_PIVOT_Y + 5.0f, 545.0f }, { 2.5f, TRIG_PIVOT_Y + 5.0f, 545.0f },
+        { 2.5f, TRIG_PIVOT_Y + 5.0f, 556.0f }, { -2.5f, TRIG_PIVOT_Y + 5.0f, 556.0f },
+    };
+    Hex(s, body);
+    Tube(s, (Vector3){ -3.6f, TRIG_PIVOT_Y, TRIG_PIVOT_Z }, (Vector3){ 3.6f, TRIG_PIVOT_Y, TRIG_PIVOT_Z }, 2.6f, 2.6f, 14, true, true);
+}
+
+// ---------------------------------------------------------------------------
+// Fired cartridge case, 7.62x39
+//
+// Case length 38.70, rim and base diameter 11.35, shoulder 10.07, neck 8.60, from the cartridge drawing on the 7.62x39mm Wikipedia article. Overall cartridge length 56.00, which is the figure the carrier's travel has to beat for a fresh round to have anywhere to go, and CheckAction reports that margin.
+//
+// Its local origin is the case's own centre, so it can tumble about itself and be flung along a trajectory by one matrix.
+// ---------------------------------------------------------------------------
+
+#define CASE_L      38.70f
+#define CASE_R       5.675f
+#define CASE_NECK_R  4.30f
+#define CASE_Z      (CAR_Z0 - 14.0f)   // the case sits on the bolt face, and the bolt face is where the bolt says it is
+
+static void BuildCase(void)
+{
+    GroupOrigin(&gCase, (Vector3){ 0.0f, BORE, CASE_Z - CASE_L * 0.5f });
+    Builder *s = &gCase.b[MAT_BRASS];
+
+    const float y = BORE, z0 = CASE_Z - CASE_L;
+    Tube(s, (Vector3){ 0, y, z0 + 38.70f }, (Vector3){ 0, y, z0 + 33.00f }, CASE_NECK_R, CASE_NECK_R, 20, true, false);
+    Tube(s, (Vector3){ 0, y, z0 + 33.00f }, (Vector3){ 0, y, z0 + 29.00f }, CASE_NECK_R, 5.035f, 20, false, false);
+    Tube(s, (Vector3){ 0, y, z0 + 29.00f }, (Vector3){ 0, y, z0 + 6.00f }, 5.035f, CASE_R, 20, false, false);
+    Tube(s, (Vector3){ 0, y, z0 + 6.00f }, (Vector3){ 0, y, z0 + 4.60f }, CASE_R, 4.85f, 20, false, false);
+    Tube(s, (Vector3){ 0, y, z0 + 4.60f }, (Vector3){ 0, y, z0 + 2.40f }, 4.85f, 4.85f, 20, false, false);
+    Tube(s, (Vector3){ 0, y, z0 + 2.40f }, (Vector3){ 0, y, z0 + 1.00f }, 4.85f, CASE_R, 20, false, false);
+    Tube(s, (Vector3){ 0, y, z0 + 1.00f }, (Vector3){ 0, y, z0 }, CASE_R, CASE_R, 20, false, true);
+}
+
+// ---------------------------------------------------------------------------
+// Muzzle flash
+//
+// One unlit mesh at the muzzle: a spindle along the bore and six radial spikes, white-hot at the muzzle face and dropping to orange at the tips through vertex colour, since it is one mesh and the material carries one colour.
+// The AK-47 has no flash hider, so the flash is a broad open star rather than the narrow petals a pronged device makes. Size is judged, not measured: roughly 140 mm along the bore and 190 mm across.
+// ---------------------------------------------------------------------------
+
+static Builder gFlashB;
+static Model gFlashM;
+static BoundingBox gFlashLocal;
+static Matrix gFlashX;
+static bool gFlashOn;
+
+static void BuildFlash(void)
+{
+    Builder *f = &gFlashB;
+    gOrigin = (Vector3){ 0.0f, BORE, 0.0f };
+    Mark m = { f->vertexCount, f->triangleCount };
+
+    // Forward is -z: z runs aft from the muzzle face, which is z 0.
+    Tube(f, (Vector3){ 0, BORE, 6.0f }, (Vector3){ 0, BORE, -22.0f }, 13.0f, 31.0f, 18, false, false);
+    Tube(f, (Vector3){ 0, BORE, -22.0f }, (Vector3){ 0, BORE, -140.0f }, 31.0f, 2.5f, 18, false, true);
+
+    // Seven rays at irregular angles, lengths and thicknesses. Six evenly spaced rays of two alternating lengths is a graphic star, which is what the first version drew: the eye reads the symmetry before it reads the flash.
+    for (int k = 0; k < 7; k++) {
+        float a = (360.0f * (float)k / 7.0f + 62.0f * Hash2(k, 1, 907)) * DEG2RAD;
+        float reach = 42.0f + 66.0f * Hash2(k, 2, 907);
+        float root = 8.0f + 6.0f * Hash2(k, 3, 907);
+        float lean = 0.45f + 0.75f * Hash2(k, 4, 907);
+        Vector3 a0 = { 0.0f, BORE, -12.0f };
+        Vector3 a1 = { reach * cosf(a), BORE + reach * sinf(a), -12.0f - reach * lean };
+        Tube(f, a0, a1, root, 1.2f, 10, false, true);
+    }
+
+    // Ramped along z, and forward is -z, so the low end of the range is the tips.
+    ShadeRange(f, m, 2, (Color){ 226, 104, 30, 255 }, (Color){ 255, 250, 226, 255 });
+    gOrigin = STATIC_ORIGIN;
+}
+
+// ---------------------------------------------------------------------------
+// Smoke
+//
+// One lumpy unit blob, drawn once per puff with a scale and a translation, because a puff differs from its neighbours only in where it is, how big it has grown and how faded it is. Building eight meshes to say that would be eight copies of the same statement.
+//
+// Transparent, and therefore unlit: lighting.fs cannot carry alpha at all (see FinishUnlit), so the only shading a puff has is the vertical ramp ShadeRange bakes into it. Depth writes are turned off while they draw and the smoke is drawn last, so puffs blend with each other and with the rifle instead of punching holes in one another in whatever order the array happens to be in.
+//
+// Smoke that behaved honestly would still be hanging there at the end of the cycle, and a repeating cycle would silt up with it. Each puff therefore fades to nothing by the end, which is a concession to looping and not a claim about smoke.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    Vector3 from;      // model mm, where it leaves the rifle
+    float t0;          // phase at which it appears
+    float r0, grow;    // mm, and mm per real second
+    Vector3 drift;     // mm per real second
+    Vector3 rot;       // fixed orientation, so one mesh does not read as one shape repeated
+    float peak;        // alpha at its strongest
+} PuffSpec;
+
+#define MUZZLE_PUFFS 22
+#define PORT_PUFFS    6
+#define PUFF_COUNT   (MUZZLE_PUFFS + PORT_PUFFS)
+
+static PuffSpec gPuffSpec[PUFF_COUNT];
+
+// One instance per puff per round: each shot lays down its own plume and they pile up, which is what a burst looks like.
+#define PUFF_INSTANCES (SHOTS * PUFF_COUNT)
+#define PUFF_LIFE      0.26f   // real seconds a puff lasts; the last round's must clear before the cycle repeats
+#define PUFF_DRAG      0.060f  // real seconds for a puff to shed its jet momentum
+
+// Many faint puffs, not a few solid ones. A single blob at the alpha needed to be seen at all is a grey rock with a polygonal edge, however finely it is subdivided, because a closed opaque-ish surface has a hard silhouette wherever you put it. Overlapping seventeen of them at about a sixth of that alpha each puts the density in the middle and lets the edge fall off, which is the only soft edge available without a per-fragment falloff the fixed shaders cannot express.
+// The variation is deterministic: Hash2 keyed on the puff index, the same lattice hash the diffuse maps are built from, so the plume is identical on every run and a critique of frame 3 still refers to the same frame 3 tomorrow.
+static void MakePuffs(void)
+{
+    for (int i = 0; i < MUZZLE_PUFFS; i++) {
+        PuffSpec *s = &gPuffSpec[i];
+        float u = (float)i / (float)(MUZZLE_PUFFS - 1);      // 0 at the muzzle, 1 at the head of the plume
+        // The size spread is deliberately wide. Puffs within a narrow size band read as a row of repeated shells however many there are, because each one contributes a silhouette of about the same radius; a spread of four to one breaks that up.
+        float big = Hash2(i, 1, 31) * Hash2(i, 8, 31);
+        s->from = (Vector3){ (Hash2(i, 9, 31) - 0.5f) * 26.0f, BORE + (Hash2(i, 10, 31) - 0.5f) * 22.0f, -4.0f - 52.0f * u };
+        s->t0 = 0.0004f * (float)i;   // real seconds after this round's ignition
+        s->r0 = 4.0f + 9.0f * big;
+        s->grow = 170.0f + 420.0f * big;
+        s->drift = (Vector3){ (Hash2(i, 3, 31) - 0.5f) * 520.0f,
+                              70.0f + 400.0f * Hash2(i, 4, 31),
+                              -600.0f - 2500.0f * u };
+        s->rot = (Vector3){ Hash2(i, 5, 31) * 2.0f * PI, Hash2(i, 6, 31) * 2.0f * PI, Hash2(i, 7, 31) * 2.0f * PI };
+        s->peak = 0.135f - 0.065f * u;
+    }
+
+    // The port only smokes once the action has opened it, so these start after the carrier has begun to travel and go up and outboard.
+    // They are deliberately much fainter than the muzzle plume. At the muzzle's density they drift between the camera and the receiver and veil the whole flank, and the ejection port is the one thing in this model a reviewer most needs to see into.
+    for (int i = 0; i < PORT_PUFFS; i++) {
+        PuffSpec *s = &gPuffSpec[MUZZLE_PUFFS + i];
+        float u = (float)i / (float)(PORT_PUFFS - 1);
+        s->from = (Vector3){ 14.0f, 220.0f, 415.0f + 30.0f * u };
+        s->t0 = 0.019f + 0.006f * (float)i;
+        s->r0 = 8.0f + 6.0f * Hash2(i, 11, 57);
+        s->grow = 300.0f + 200.0f * Hash2(i, 12, 57);
+        s->drift = (Vector3){ 190.0f + 170.0f * Hash2(i, 13, 57),
+                              430.0f + 380.0f * Hash2(i, 14, 57),
+                              (Hash2(i, 15, 57) - 0.5f) * 260.0f };
+        s->rot = (Vector3){ Hash2(i, 16, 57) * 2.0f * PI, Hash2(i, 17, 57) * 2.0f * PI, Hash2(i, 18, 57) * 2.0f * PI };
+        s->peak = 0.10f - 0.04f * u;
+    }
+}
+
+static Builder gPuffB;
+static Model gPuffM;
+static BoundingBox gPuffLocal;
+static Matrix gPuffX[PUFF_INSTANCES];
+static float gPuffA[PUFF_INSTANCES];
+
+// A sphere of unit world radius, with its radius pushed about by a few low-order harmonics so a puff is not a billiard ball. Emitted at 100 mm because Vert scales by UNIT, and 100 mm is one world unit.
+// Normals are radial and approximate; nothing that draws this is lit, so they are never read.
+static void Blob(Builder *b, int seed, int rings, int segs)
+{
+    float s = (float)seed * 1.7f;
+    for (int i = 0; i < rings; i++) {
+        for (int j = 0; j < segs; j++) {
+            Vector3 q[4];
+            for (int c = 0; c < 4; c++) {
+                float phi = PI * (float)(i + ((c == 2 || c == 3) ? 1 : 0)) / (float)rings;
+                float th = 2.0f * PI * (float)(j + ((c == 1 || c == 2) ? 1 : 0)) / (float)segs;
+                float r = 100.0f * (1.0f + 0.26f * sinf(3.0f * th + s) * sinf(2.0f * phi)
+                                         + 0.17f * cosf(5.0f * phi + s * 1.3f)
+                                         + 0.14f * sinf(4.0f * th - 3.0f * phi + s)
+                                         + 0.09f * cosf(7.0f * th + 2.0f * phi + s * 2.1f));
+                q[c] = (Vector3){ r * sinf(phi) * sinf(th), r * cosf(phi), r * sinf(phi) * cosf(th) };
+            }
+            Quad(b, q[0], q[1], q[2], q[3]);
+        }
+    }
+}
+
+static void BuildPuff(void)
+{
+    gOrigin = (Vector3){ 0.0f, 0.0f, 0.0f };
+    Mark m = { gPuffB.vertexCount, gPuffB.triangleCount };
+    Blob(&gPuffB, 3, 18, 26);
+    // Shaded down the y axis: smoke is lit from above by the same key light as everything else, and unlit geometry has to be told so.
+    ShadeRange(&gPuffB, m, 1, (Color){ 92, 94, 102, 255 }, (Color){ 214, 214, 220, 255 });
+    gOrigin = STATIC_ORIGIN;
+}
+
+// ---------------------------------------------------------------------------
+// Pose
+//
+// A three-round burst, shown at one sixteenth speed. The AK-47's cyclic rate is 600 rounds per minute, so one action cycle is 0.100 s of real time and the burst is 0.300 s; the cycle runs five shot periods so that the last round has somewhere to finish and the loop has a pause in it. Every motion below is computed in real seconds and played back over CYCLE, which is what lets three ballistic cases, three smoke plumes and the recoil of three shots all share one clock instead of being animated by eye.
+//
+// Ignition of each round falls on a fifth of the cycle: phases 0, 0.2 and 0.4. That is deliberate and it is the only way the muzzle flashes can be rendered at all, since a flash lasts about 3 ms, under one percent of this cycle. Any --frames that is a multiple of 5 lands a frame on all three ignitions; --frames 15 is the useful default and --frames 8 will catch only the first.
+//
+// The travel is NOT a measured figure. No reference found gives one, so it is the largest travel this receiver admits: the carrier stops against the channel's rear wall. CheckAction measures the margin at both ends and reports which limit binds.
+// ---------------------------------------------------------------------------
+
+#define TRAVEL      72.0f     // carrier travel, mm
+
+// Fractions of ONE shot, not of the cycle.
+#define T_FLASH     0.030f   // flash gone by here: 3 ms of real time
+
+// A flash is 3 ms. At sixteen times slow that was 48 ms of playback, about three frames of a 60 Hz window; at real time it is 3 ms, under a fifth of one frame, so the window would drop it on most cycles and the rounds would go off invisibly. This floor holds a flash on for FLASH_MIN_PLAYBACK of PLAYBACK time however fast the playback is set, so it bites only when the playback is fast: at the old sixteen times it is shorter than the real duration and does nothing at all.
+// It is the one place in this file that looks at playback rather than at the rifle, and it is a concession to the frame rate rather than a claim about muzzle flash.
+// It DOES reach a rendered sequence whenever the interval between frames is shorter than the floor, which an earlier note here wrongly denied. At real time the floor is the full 34 ms, against 33 ms between frames at --frames 15 and 20 ms at --frames 25, so a flash now occupies two frames rather than one at any useful frame count. That is the price of playing the burst at the rate the rifle fires it: a 3 ms event cannot be both real-time and one frame long at 60 Hz, and a flash the window drops entirely is worse than one held a frame too long.
+#define FLASH_MIN_PLAYBACK 0.034f
+#define T_UNLOCK    0.010f   // carrier starts moving
+#define T_REAR      0.300f   // fraction of a shot at which it reaches full travel
+#define T_DWELL     0.360f
+#define T_HOME      0.940f   // back in battery just as the next round fires, which is what a cyclic rate means
+// The case leaves at the end of the rearward stroke, not partway through it, and that is forced rather than chosen. Its centre sits 19.35 mm from each end, so it is only clear of the port's front edge at z 395 once the carrier has drawn it back past z 414.35, which takes essentially the whole 72 mm of travel. Ejecting at 0.18 put 29 mm of its forward end through the receiver wall ahead of the port, which is what the z half of the crossing check caught.
+#define T_EJECT     0.310f   // fraction of a shot at which the case leaves the extractor, during the dwell at full travel
+
+#define GRAVITY    9810.0f   // mm/s^2
+#define CASE_VX    5000.0f   // ejection velocity, mm/s: right, up, and slightly forward. Faster than it needs to look, because the crossing time is what sets how far the case drifts vertically while it is in the opening
+#define CASE_VY    1250.0f
+#define CASE_VZ    -300.0f
+#define CASE_LIFT    12.1f   // the ejector kicks the case up off the bolt face, and it has to: a case centred on the bore at 204.4 does not line up with an opening that starts at 211, so it leaves all but sitting on the sill
+
+// The case does not begin to tumble until it is clear of the receiver wall, and that is physics rather than convenience: while it is in the port it is still boxed in by the opening it is going through. A 17 mm port passing an 11.35 mm case leaves 5.65 mm of slack in total, so a case tumbling on the way out simply does not fit, and CheckAction proves it does not: sampling the case's surface rather than its axis, a free tumble from the moment of extraction put brass at y 208.0 to 230.2 through a port of 211 to 228.
+// Held straight until it is out, the same case clears with about a millimetre at each edge. That is a tight fit, and it should be: a real ejection port is a tight fit.
+#define CASE_SPIN    12.0f   // turns a second, once it is clear
+
+static float Ramp(float t, float t0, float t1)
+{
+    if (t <= t0) return 0.0f;
+    if (t >= t1) return 1.0f;
+    return Smoothstep01((t - t0) / (t1 - t0));
+}
+
+// One action cycle, u running 0 to 1 across it.
+static float CarrierStroke(float u)
+{
+    if (u < T_REAR) return TRAVEL * Ramp(u, T_UNLOCK, T_REAR);
+    if (u < T_DWELL) return TRAVEL;
+    return TRAVEL * (1.0f - Ramp(u, T_DWELL, T_HOME));
+}
+
+// The carrier runs one stroke per round and then stops in battery for the rest of the cycle.
+static float CarrierTravelAt(float tr)
+{
+    if (tr < 0.0f || tr >= BURST_T) return 0.0f;
+    return CarrierStroke(fmodf(tr, SHOT_T) / SHOT_T);
+}
+
+static float TriggerAngle(float tr)
+{
+    // Held down through the whole burst, which is what makes it a burst rather than three shots, then released and pulled again before the cycle repeats so the end meets the start with no step in it.
+    // Negative about local x swings the shoe aft: the shoe sits below and forward of the pin, and z' = y sin a + z cos a with a negative local y.
+    float pull = 1.0f - Ramp(tr, BURST_T + 0.02f, BURST_T + 0.06f) + Ramp(tr, TOTAL_T - 0.05f, TOTAL_T);
+    return -TRIG_PULL * DEG2RAD * pull;
+}
+
+// The frame the whole rifle sits in. Every body on the rifle is posed inside it; a case once it has left the extractor, and smoke once it has left the muzzle, are not, because they are no longer attached to anything that recoils.
+//
+// Each round contributes its own impulse and they are summed, which is where a burst stops being three separate shots. The two responses have different time constants ON PURPOSE, and that is the whole of why a burst climbs:
+//   the shoulder absorbs the rearward push and gives it back inside RECOIL_T = 60 ms, which is less than the 100 ms between rounds, so the linear recoil is fully spent before the next round fires and does not accumulate. Every shot moves the rifle back the same 24.6 mm.
+//   the arms let the muzzle rise and bring it down over RISE_T = 220 ms, which is longer than the gap, so the second round's rotation lands on top of the first's and the third on top of both. Peak climb is over three times a single shot's.
+// Both constants are chosen rather than derived, as the single-shot shoulder always was; what is derived is the impulse each round delivers.
+#define RECOIL_T     0.060f   // real seconds for the shoulder to absorb one round and return
+#define RISE_T       0.220f   // real seconds for the arms to bring the muzzle back down
+
+static Matrix RifleAt(float tr, float *outAft, float *outRise)
+{
+    float v = BULLET_M * BULLET_V / RIFLE_M * 1000.0f;                              // mm/s
+    float w = BULLET_M * BULLET_V * ((BORE - SHOULDER_Y) * 0.001f) / RIFLE_I;       // rad/s
+
+    float aft = 0.0f, rise = 0.0f;
+    for (int k = 0; k < SHOTS; k++) {
+        float dt = tr - (float)k * SHOT_T;
+        if (dt > 0.0f && dt < RECOIL_T) aft += v * RECOIL_T / PI * sinf(PI * dt / RECOIL_T);
+        if (dt > 0.0f && dt < RISE_T) rise += w * RISE_T / PI * sinf(PI * dt / RISE_T);
+    }
+    if (outAft) *outAft = aft;
+    if (outRise) *outRise = rise;
+
+    // Positive about x lifts the muzzle: the muzzle is at negative z from the shoulder, and y' = y cos a - z sin a.
+    Vector3 s0 = ToWorld((Vector3){ 0.0f, SHOULDER_Y, SHOULDER_Z });
+    return MatrixMultiply(MatrixTranslate(-s0.x, -s0.y, -s0.z),
+                          MatrixMultiply(MatrixRotateX(rise),
+                                         MatrixTranslate(s0.x, s0.y, s0.z + aft * UNIT)));
+}
+
+static float gRecoilAft, gRecoilRise;
+static Matrix gCaseX[SHOTS];
+static bool gCaseOn[SHOTS];
+
+// Where round k's case is. Before its own round fires it is still in the magazine and is not drawn at all; between ignition and extraction it rides that round's bolt face; after that it is a free body thrown from wherever the rifle was when it let go.
+static void PoseCase(int k, float tr, float rifleTravel, Matrix rifle)
+{
+    float dt = tr - (float)k * SHOT_T;
+    gCaseOn[k] = (dt >= 0.0f);
+    if (!gCaseOn[k]) return;
+
+    Vector3 c = ToWorld(gCase.pivot);
+    if (dt < T_EJECT * SHOT_T) {
+        gCaseX[k] = MatrixMultiply(MatrixTranslate(c.x, c.y, c.z + rifleTravel * UNIT), rifle);
+        return;
+    }
+
+    float ft = dt - T_EJECT * SHOT_T;             // real seconds since it left the extractor
+    float x = CASE_VX * ft;
+    float y = CASE_VY * ft - 0.5f * GRAVITY * ft * ft;
+    float z = CASE_VZ * ft;
+    // Free to tumble only once its whole width is past the outer face of the receiver plate.
+    float clear = (RCV_SIDE + CASE_R) / CASE_VX;
+    float spin = 2.0f * PI * CASE_SPIN * fmaxf(0.0f, ft - clear);
+
+    float ejectAt = (float)k * SHOT_T + T_EJECT * SHOT_T;
+    Vector3 origin = Vector3Transform((Vector3){ c.x, c.y + CASE_LIFT * UNIT,
+                                                 c.z + CarrierStroke(T_EJECT) * UNIT },
+                                      RifleAt(ejectAt, NULL, NULL));
+    gCaseX[k] = MatrixMultiply(MatrixRotateX(spin),
+                               MatrixTranslate(origin.x + x * UNIT,
+                                               origin.y + y * UNIT,
+                                               origin.z + z * UNIT));
+}
+
+static void Update(float t)
+{
+    float phase = t / CYCLE;
+    phase -= floorf(phase);
+    float tr = phase * TOTAL_T;              // real seconds into the burst
+
+    Matrix rifle = RifleAt(tr, &gRecoilAft, &gRecoilRise);
+
+    gSight.xform = MatrixMultiply(GroupRest(&gSight), rifle);
+    gBarrel.xform = MatrixMultiply(GroupRest(&gBarrel), rifle);
+    gWood.xform = MatrixMultiply(GroupRest(&gWood), rifle);
+    gRecv.xform = MatrixMultiply(GroupRest(&gRecv), rifle);
+    gMag.xform = MatrixMultiply(GroupRest(&gMag), rifle);
+    gFire.xform = MatrixMultiply(GroupRest(&gFire), rifle);
+    gStock.xform = MatrixMultiply(GroupRest(&gStock), rifle);
+
+    float travel = CarrierTravelAt(tr);
+    Vector3 c = ToWorld(gCarrier.pivot);
+    gCarrier.xform = MatrixMultiply(MatrixTranslate(c.x, c.y, c.z + travel * UNIT), rifle);
+
+    Vector3 p = ToWorld(gTrigger.pivot);
+    gTrigger.xform = MatrixMultiply(MatrixMultiply(MatrixRotateX(TriggerAngle(tr)),
+                                                   MatrixTranslate(p.x, p.y, p.z)), rifle);
+
+    // The flash is gas still leaving the barrel, so it belongs to the rifle and moves with it. Over its three milliseconds the rifle has barely started to move anyway: the flash is over long before the recoil is.
+    Vector3 fm = ToWorld((Vector3){ 0.0f, BORE, 0.0f });
+    gFlashOn = false;
+    float flashT = fmaxf(T_FLASH * SHOT_T, FLASH_MIN_PLAYBACK / SLOWDOWN);
+    for (int k = 0; k < SHOTS; k++) {
+        float dt = tr - (float)k * SHOT_T;
+        if (dt >= 0.0f && dt < flashT) gFlashOn = true;
+    }
+    gFlashX = MatrixMultiply(MatrixTranslate(fm.x, fm.y, fm.z), rifle);
+
+    for (int k = 0; k < SHOTS; k++) PoseCase(k, tr, travel, rifle);
+
+    for (int k = 0; k < SHOTS; k++) {
+        for (int i = 0; i < PUFF_COUNT; i++) {
+            const PuffSpec *s = &gPuffSpec[i];
+            int n = k * PUFF_COUNT + i;
+            float born = (float)k * SHOT_T + s->t0;
+            float age = tr - born;
+            if (age < 0.0f || age > PUFF_LIFE) { gPuffA[n] = 0.0f; continue; }
+
+            // Smoke leaves the muzzle or the port and is then free of the rifle, so its start point is where that opening was at the moment it left.
+            Vector3 origin = Vector3Transform(ToWorld(s->from), RifleAt(born, NULL, NULL));
+            float r = (s->r0 + s->grow * age) * UNIT;
+
+            // Drag, not constant velocity. A puff carried at its jet speed for the whole of a burst ends up 800 mm downrange and out of frame; real smoke sheds its momentum in a few tens of milliseconds and then hangs. This is that, as a first-order decay to a terminal displacement of drift * PUFF_DRAG.
+            float carried = PUFF_DRAG * (1.0f - expf(-age / PUFF_DRAG));
+
+            gPuffX[n] = MatrixMultiply(MatrixMultiply(MatrixScale(r, r, r), MatrixRotateXYZ(s->rot)),
+                                       MatrixTranslate(origin.x + s->drift.x * carried * UNIT,
+                                                       origin.y + s->drift.y * carried * UNIT,
+                                                       origin.z + s->drift.z * carried * UNIT));
+            gPuffA[n] = s->peak * Clamp(age / 0.004f, 0.0f, 1.0f) * (1.0f - age / PUFF_LIFE);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The claims a pose can get wrong without looking wrong in any one frame, measured over the cycle rather than argued for.
+// ---------------------------------------------------------------------------
+
+static void CheckAction(void)
+{
+    // Five times the real time of the single-shot cycle, so the step count goes up five times with it: the case crosses the 5.7 mm of receiver wall in about 5 ms, and a sampling interval coarser than that cannot support the millimetre margins reported below.
+    const int steps = 3600;
+    float handRear = -1e9f, carRear = -1e9f, headAft = -1e9f, headFwd = 1e9f;
+    float shoeAft = -1e9f, shoeLow = 1e9f;
+    float portLoY = 1e9f, portHiY = -1e9f;
+    float portLoZ = 1e9f, portHiZ = -1e9f;
+    bool portSeen = false;
+
+    for (int i = 0; i < steps; i++) {
+        float phase = (float)i / (float)steps;
+        float tr = phase * TOTAL_T;
+        Update(CYCLE * phase);
+        float travel = CarrierTravelAt(tr);
+
+        if (HAND_Z1 + travel > handRear) handRear = HAND_Z1 + travel;
+        if (CAR_Z0 + CAR_L + travel > carRear) carRear = CAR_Z0 + CAR_L + travel;
+        if (GASTUBE_Z0 + 29.0f + travel > headAft) headAft = GASTUBE_Z0 + 29.0f + travel;
+        if (GASTUBE_Z0 + 5.0f + travel < headFwd) headFwd = GASTUBE_Z0 + 5.0f + travel;
+
+        // Everything the trigger and the case are checked against is on the rifle and recoils with it, so both are measured in the rifle's frame. Measuring them in the world instead compares a recoiled part against an un-recoiled limit, which is what the first version of this did: it reported the trigger 21 mm through a guard it never touches.
+        Matrix rifleInv = MatrixInvert(RifleAt(tr, NULL, NULL));
+
+        // Trigger shoe, transformed by the pose rather than predicted from it.
+        Vector3 shoe = Vector3Transform((Vector3){ 0.0f, (140.0f - TRIG_PIVOT_Y) * UNIT, (549.0f - TRIG_PIVOT_Z) * UNIT },
+                                        MatrixMultiply(gTrigger.xform, rifleInv));
+        float shoeZ = shoe.z / UNIT + Z_ORIGIN, shoeY = shoe.y / UNIT;
+        if (shoeZ > shoeAft) shoeAft = shoeZ;
+        if (shoeY < shoeLow) shoeLow = shoeY;
+
+        // Where the case crosses the thickness of the receiver plate: that is the moment it is either going through the ejection port or through the side of the rifle. Both ends and the middle are sampled, because a tumbling case presents anything between its 11.35 mm diameter and its 38.7 mm length to the opening.
+        // Every round's case, not just one: three of them go through the same opening and only the check knows whether all three make it. A case still riding the bolt never enters the x window below, so no separate test for "has it been ejected yet" is needed.
+        for (int k = 0; k < SHOTS; k++) {
+            if (!gCaseOn[k]) continue;
+            // The case's SURFACE, not its axis. Sampling the centreline says nothing about a body 11.35 mm thick: an axis 4.8 mm below the top edge of the port still has 0.9 mm of brass through the plate. Five stations along the case by sixteen around it, at the full base radius, so the neck end is checked conservatively.
+            Matrix toRifle = MatrixMultiply(gCaseX[k], rifleInv);
+            for (int e = 0; e <= 4; e++) {
+                for (int a = 0; a < 16; a++) {
+                    float ang = 2.0f * PI * (float)a / 16.0f;
+                    Vector3 local = { CASE_R * cosf(ang) * UNIT, CASE_R * sinf(ang) * UNIT,
+                                      ((float)e / 4.0f - 0.5f) * CASE_L * UNIT };
+                    Vector3 q = Vector3Transform(local, toRifle);
+                    float qx = q.x / UNIT, qy = q.y / UNIT;
+                    if (qx >= CHAN_HW && qx <= RCV_SIDE) {
+                        // Height alone does not prove the case got out: brass at the right height but forward of the port's front edge is going through the plate just as surely. The opening is bounded both ways and so is this.
+                        float qz = q.z / UNIT + Z_ORIGIN;
+                        portSeen = true;
+                        if (qy < portLoY) portLoY = qy;
+                        if (qy > portHiY) portHiY = qy;
+                        if (qz < portLoZ) portLoZ = qz;
+                        if (qz > portHiZ) portHiZ = qz;
+                    }
+                }
+            }
+        }
+    }
+
+    // Recoil, reported as what the momentum actually comes to rather than as the numbers that were typed in.
+    {
+        float v = BULLET_M * BULLET_V / RIFLE_M * 1000.0f;
+        float w = BULLET_M * BULLET_V * ((BORE - SHOULDER_Y) * 0.001f) / RIFLE_I;
+        float aftPeak = 0.0f, risePeak = 0.0f, aftEnd = 0.0f;
+        for (int i = 0; i <= steps; i++) {
+            float a, r;
+            RifleAt((float)i / (float)steps * TOTAL_T, &a, &r);
+            if (a > aftPeak) aftPeak = a;
+            if (r > risePeak) risePeak = r;
+            aftEnd = a;
+        }
+        // A moment arm this long turns into rise at the muzzle 880 mm from the shoulder.
+        float muzzleUp = risePeak * (SHOULDER_Z - 0.0f);
+        TraceLog(LOG_INFO, "ak47: recoil velocity %.0f mm/s and %.3f rad/s from a %.1f g bullet at %.0f m/s into %.2f kg on an %.1f mm moment arm",
+                 v, w, BULLET_M * 1000.0f, BULLET_V, RIFLE_M, BORE - SHOULDER_Y);
+        // One shot on its own gives 24.6 mm and 0.64 degrees. The aft figure should match it, because the shoulder is done inside 60 ms and the next round is 100 ms away; the rise figure should be several times it, because the arms are not, and that difference IS the burst.
+        TraceLog(LOG_INFO, "ak47: %d rounds; peak recoil %.1f mm aft (one shot alone gives %.1f) and %.2f degrees of climb (one shot alone gives %.2f), lifting the muzzle %.1f mm; %.3f mm left at the end of the cycle",
+                 SHOTS, aftPeak, v * RECOIL_T / PI, risePeak * RAD2DEG, w * RISE_T / PI * RAD2DEG, muzzleUp, aftEnd);
+        if (aftEnd > 0.05f) {
+            TraceLog(LOG_WARNING, "ak47: the rifle is still %.2f mm out of battery when the cycle repeats", aftEnd);
+        }
+    }
+
+    TraceLog(LOG_INFO, "ak47: travel %.1f mm; carrier rear reaches %.1f against the channel wall at %.1f (%.1f mm spare)",
+             TRAVEL, carRear, CHAN_Z1, CHAN_Z1 - carRear);
+    TraceLog(LOG_INFO, "ak47: charging handle reaches %.1f against the slot end at %.1f (%.1f mm spare); the channel wall is the binding limit",
+             handRear, TRACK_Z1, TRACK_Z1 - handRear);
+    // BOTH ends. Testing only the aft one reported 112 mm of spare while 23 mm of the head stood out in the open ahead of the tube at every pose where the carrier was forward, which is the failure this file's own notes describe: a bound checked in one axis and not the other.
+    TraceLog(LOG_INFO, "ak47: piston head runs %.1f to %.1f inside a gas tube of %.1f to %.1f (%.1f mm spare at the front, %.1f at the rear)",
+             headFwd, headAft, GASTUBE_Z0, GASTUBE_Z1, headFwd - GASTUBE_Z0, GASTUBE_Z1 - headAft);
+    TraceLog(LOG_INFO, "ak47: travel %.1f mm against a 56.0 mm cartridge, %.1f mm of clearance for the next round",
+             TRAVEL, TRAVEL - 56.0f);
+    TraceLog(LOG_INFO, "ak47: trigger shoe reaches z %.1f, guard rear web at 558.0 (%.1f mm spare), and drops to y %.1f over the bow at 133.4 (%.1f mm spare)",
+             shoeAft, 558.0f - shoeAft, shoeLow, shoeLow - 133.4f);
+
+    if (carRear > CHAN_Z1) TraceLog(LOG_WARNING, "ak47: carrier passes through the channel rear wall by %.2f mm", carRear - CHAN_Z1);
+    if (handRear > TRACK_Z1) TraceLog(LOG_WARNING, "ak47: charging handle passes the end of its slot by %.2f mm", handRear - TRACK_Z1);
+    if (headAft > GASTUBE_Z1) TraceLog(LOG_WARNING, "ak47: piston head leaves the back of the gas tube by %.2f mm", headAft - GASTUBE_Z1);
+    if (headFwd < GASTUBE_Z0) TraceLog(LOG_WARNING, "ak47: piston head stands %.2f mm out of the front of the gas tube", GASTUBE_Z0 - headFwd);
+    if (TRAVEL < 56.0f) TraceLog(LOG_WARNING, "ak47: travel %.1f mm is under the 56.0 mm cartridge length", TRAVEL);
+
+    if (!portSeen) {
+        TraceLog(LOG_WARNING, "ak47: no case crosses the receiver wall; the ejection is not being sampled");
+    } else if (portLoY < PORT_Y0 || portHiY > RCV_TOP || portLoZ < PORT_Z0 || portHiZ > PORT_Z1) {
+        TraceLog(LOG_WARNING, "ak47: the case crosses the receiver wall at y %.1f to %.1f and z %.1f to %.1f, outside the ejection port's y %.1f to %.1f by z %.1f to %.1f",
+                 portLoY, portHiY, portLoZ, portHiZ, PORT_Y0, RCV_TOP, PORT_Z0, PORT_Z1);
+    } else {
+        TraceLog(LOG_INFO, "ak47: the case crosses the receiver wall at y %.1f to %.1f and z %.1f to %.1f, inside the ejection port's y %.1f to %.1f by z %.1f to %.1f",
+                 portLoY, portHiY, portLoZ, portHiZ, PORT_Y0, RCV_TOP, PORT_Z0, PORT_Z1);
+    }
+}
+
+// A part that moves has no single bounding box, so --part frames the union over the cycle.
+// GetModelBoundingBox will not do the job: it transforms only the box's own min and max corner and carries the warning "does not support rotation transformations" (vendor/raylib/src/rmodels.c:1243), which is wrong for the trigger and badly wrong for the tumbling case.
+static void SweepBounds(Group **groups, int n)
+{
+    // Five shot periods, and the dwell at full travel is 6 ms of them, so the sampling has to be fine enough to land on it.
+    const int steps = 240;
+    bool seen[16] = { false };
+
+    for (int i = 0; i <= steps; i++) {
+        Update(CYCLE * (float)i / (float)steps);
+        for (int g = 0; g < n; g++) {
+            BoundingBox l = groups[g]->local;
+            for (int c = 0; c < 8; c++) {
+                Vector3 corner = {
+                    (c & 1) ? l.max.x : l.min.x,
+                    (c & 2) ? l.max.y : l.min.y,
+                    (c & 4) ? l.max.z : l.min.z,
+                };
+                Vector3 w = Vector3Transform(corner, groups[g]->xform);
+                if (!seen[g]) { groups[g]->swept.min = w; groups[g]->swept.max = w; seen[g] = true; }
+                else {
+                    groups[g]->swept.min = Vector3Min(groups[g]->swept.min, w);
+                    groups[g]->swept.max = Vector3Max(groups[g]->swept.max, w);
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 
 static void Init(void)
 {
@@ -1155,6 +1939,9 @@ static void Init(void)
     BuildMag();
     BuildFire();
     BuildStock();
+    BuildCarrier();
+    BuildTrigger();
+    BuildCase();
 
     GroupFinish(&gSight, "front_sight");
     GroupFinish(&gBarrel, "barrel");
@@ -1163,6 +1950,23 @@ static void Init(void)
     GroupFinish(&gMag, "magazine");
     GroupFinish(&gFire, "fire_control");
     GroupFinish(&gStock, "stock");
+    GroupFinish(&gCarrier, "bolt_carrier");
+    GroupFinish(&gTrigger, "trigger");
+    GroupFinish(&gCase, "case");
+
+    BuildFlash();
+    MakePuffs();
+    BuildPuff();
+    gFlashM = FinishUnlit(&gFlashB, "muzzle_flash");
+    gPuffM = FinishUnlit(&gPuffB, "smoke");
+    gFlashLocal = GetModelBoundingBox(gFlashM);
+    gPuffLocal = GetModelBoundingBox(gPuffM);
+
+    CheckAction();
+
+    Group *moving[] = { &gCarrier, &gTrigger };
+    SweepBounds(moving, 2);
+    Update(0.0f);
 }
 
 static void Unload(void)
@@ -1174,6 +1978,11 @@ static void Unload(void)
     GroupUnload(&gMag);
     GroupUnload(&gFire);
     GroupUnload(&gStock);
+    GroupUnload(&gCarrier);
+    GroupUnload(&gTrigger);
+    GroupUnload(&gCase);
+    UnloadModel(gFlashM);
+    UnloadModel(gPuffM);
     UnloadTextures();
 }
 
@@ -1184,14 +1993,91 @@ static void DrawRecv(void) { GroupDraw(&gRecv); }
 static void DrawMag(void) { GroupDraw(&gMag); }
 static void DrawFire(void) { GroupDraw(&gFire); }
 static void DrawStock(void) { GroupDraw(&gStock); }
+static void DrawCarrier(void) { GroupDraw(&gCarrier); }
+static void DrawTrigger(void) { GroupDraw(&gTrigger); }
+// Three rounds, three cases. Each is the same mesh drawn where its own round put it, and a round that has not been fired yet is not drawn at all: it is still in the magazine.
+static void DrawCase(void)
+{
+    for (int k = 0; k < SHOTS; k++) {
+        if (!gCaseOn[k]) continue;
+        gCase.xform = gCaseX[k];
+        GroupDraw(&gCase);
+    }
+}
 
-static BoundingBox SightBounds(void) { return gSight.bounds; }
-static BoundingBox BarrelBounds(void) { return gBarrel.bounds; }
-static BoundingBox WoodBounds(void) { return gWood.bounds; }
-static BoundingBox RecvBounds(void) { return gRecv.bounds; }
-static BoundingBox MagBounds(void) { return gMag.bounds; }
-static BoundingBox FireBounds(void) { return gFire.bounds; }
-static BoundingBox StockBounds(void) { return gStock.bounds; }
+static void DrawFlash(void)
+{
+    if (!gFlashOn) return;
+    gFlashM.transform = gFlashX;
+    DrawModel(gFlashM, Vector3Zero(), 1.0f, WHITE);
+}
+
+// Depth writes off, and last in the part list, so the puffs blend with each other and with the rifle instead of the nearest-drawn one punching a hole in the ones behind it. They still depth-test, so smoke behind the receiver stays behind it.
+static void DrawSmoke(void)
+{
+    rlDisableDepthMask();
+    for (int i = 0; i < PUFF_INSTANCES; i++) {
+        if (gPuffA[i] <= 0.004f) continue;
+        gPuffM.transform = gPuffX[i];
+        DrawModel(gPuffM, Vector3Zero(), 1.0f,
+                  (Color){ 255, 255, 255, (unsigned char)(gPuffA[i] * 255.0f) });
+    }
+    rlEnableDepthMask();
+}
+
+static BoundingBox SightBounds(void) { return gSight.local; }
+static BoundingBox BarrelBounds(void) { return gBarrel.local; }
+static BoundingBox WoodBounds(void) { return gWood.local; }
+static BoundingBox RecvBounds(void) { return gRecv.local; }
+static BoundingBox MagBounds(void) { return gMag.local; }
+static BoundingBox FireBounds(void) { return gFire.local; }
+static BoundingBox StockBounds(void) { return gStock.local; }
+static BoundingBox CarrierBounds(void) { return gCarrier.swept; }
+static BoundingBox TriggerBounds(void) { return gTrigger.swept; }
+
+// The case is the one part framed to itself rather than to its sweep. The swept rule exists so that a body which turns or slides still frames to something a viewer can see; a body thrown 120 mm clear of the rifle frames to a box in which it is a speck. What an isolated view of a cartridge case is for is judging the case, and its arc is judged in the assembled --anim frames where the port it came out of is also in shot.
+static BoundingBox CaseBounds(void)
+{
+    Vector3 c = ToWorld(gCase.pivot);
+    BoundingBox b = gCase.local;
+    b.min = Vector3Add(b.min, c);
+    b.max = Vector3Add(b.max, c);
+    return b;
+}
+
+static BoundingBox FlashBounds(void)
+{
+    Vector3 c = ToWorld((Vector3){ 0.0f, BORE, 0.0f });
+    BoundingBox b = gFlashLocal;
+    b.min = Vector3Add(b.min, c);
+    b.max = Vector3Add(b.max, c);
+    return b;
+}
+
+// The smoke's box IS its sweep: the puffs are what the part is, and where they get to is the thing worth looking at.
+static BoundingBox SmokeBounds(void)
+{
+    BoundingBox out = { 0 };
+    bool any = false;
+    for (int i = 0; i <= 120; i++) {
+        Update(CYCLE * (float)i / 120.0f);
+        for (int k = 0; k < PUFF_INSTANCES; k++) {
+            if (gPuffA[k] <= 0.004f) continue;
+            for (int c = 0; c < 8; c++) {
+                Vector3 corner = {
+                    (c & 1) ? gPuffLocal.max.x : gPuffLocal.min.x,
+                    (c & 2) ? gPuffLocal.max.y : gPuffLocal.min.y,
+                    (c & 4) ? gPuffLocal.max.z : gPuffLocal.min.z,
+                };
+                Vector3 w = Vector3Transform(corner, gPuffX[k]);
+                if (!any) { out.min = w; out.max = w; any = true; }
+                else { out.min = Vector3Min(out.min, w); out.max = Vector3Max(out.max, w); }
+            }
+        }
+    }
+    Update(0.0f);
+    return out;
+}
 
 static const Part PARTS[] = {
     { .name = "front_sight", .draw = DrawSight, .bounds = SightBounds },
@@ -1201,17 +2087,70 @@ static const Part PARTS[] = {
     { .name = "magazine", .draw = DrawMag, .bounds = MagBounds },
     { .name = "fire_control", .draw = DrawFire, .bounds = FireBounds },
     { .name = "stock", .draw = DrawStock, .bounds = StockBounds },
+    { .name = "bolt_carrier", .draw = DrawCarrier, .bounds = CarrierBounds },
+    { .name = "trigger", .draw = DrawTrigger, .bounds = TriggerBounds },
+    { .name = "case", .draw = DrawCase, .bounds = CaseBounds },
+    { .name = "muzzle_flash", .draw = DrawFlash, .bounds = FlashBounds },
+    // Last, and it has to stay last: it is the only transparent thing here and it is drawn with depth writes off.
+    { .name = "smoke", .draw = DrawSmoke, .bounds = SmokeBounds },
 };
 
 const Scene SCENE = {
     .name = "ak47",
     .description =
-        "AK-47 with a Type 2 milled receiver and fixed wooden furniture, the configuration in references/ak47/ref_01.png.\n"
+        "AK-47 with a Type 2 milled receiver and fixed wooden furniture, the configuration in references/ak47/ref_04.png, posed through a three-round burst. Four bodies are lifted out of the static groups into their own frames; the seven static parts below are the rifle's measured geometry and are unaffected by the posing.\n"
+        "\n"
+        "WHAT MOVES, AND WHAT IS CLAIMED\n"
+        "Three rounds, played back at real time. The AK-47's cyclic rate is 600 rounds a minute, so one action cycle is 0.100 s of real time and the burst is 0.300 s; the cycle runs five shot periods, three firing and two of pause, so the last round has somewhere to finish and the loop has a gap in it. That is 0.500 s of real time over 0.500 s of playback. Every motion is computed in real seconds and played back on that one clock, which is what lets three ballistic cases, three smoke plumes and the recoil of three rounds share a clock with the carrier that threw them rather than being animated by eye.\n"
+        "The playback rate is the ONE quantity in this model that is about playback rather than about the rifle, and it scales only what the interactive window and SCENE.duration do. It cannot change a rendered sequence: --anim samples N evenly spaced phases of the cycle, so the frames come out identical whatever it is set to, which was checked rather than assumed by rendering fifteen frames at one sixteenth speed and again at one quarter and finding all fifteen byte for byte the same. If a rendered sequence looks slow, the number to change is the frame rate it is played at, and real speed is N / 0.5 fps: 30 fps for --frames 15, 60 for --frames 30.\n"
+        "One consequence is worth naming. A flash is 3 ms, which at one sixteenth speed was three frames of a 60 Hz window and at real time is under a fifth of one, so the window would drop it and rounds would go off invisibly. A flash is therefore held for a minimum of 34 ms of PLAYBACK, which bites only when the playback is fast and does nothing at the old rate. That is a concession to the frame rate rather than a claim about muzzle flash, and at real time it DOES reach the renders: the floor is 34 ms against 33 ms between frames at --frames 15 and 20 ms at --frames 25, so a flash occupies two frames rather than one. A 3 ms event cannot be both real-time and one frame long at 60 Hz, and a dropped flash is worse than a long one.\n"
+        "Ignition falls on a fifth of the cycle: phases 0, 0.2 and 0.4. That is not tidiness, it is the only way the flashes can be rendered at all. A flash lasts about 3 ms, under one percent of this cycle, so no evenly spaced set of frames catches one by luck. Any --frames that is a multiple of 5 lands a frame on all three ignitions; --frames 15 is the useful default, and --frames 8 will show the first flash and miss the other two.\n"
+        "\n"
+        "recoil: derived, not styled, and applied as a parent frame that every body on the rifle is posed inside. A 7.9 g M43 bullet at 715 m/s into a 4.39 kg rifle with a loaded magazine gives 1.29 m/s by conservation of momentum. The bore axis at y 204.4 is resisted at the shoulder, which the buttplate centre puts at y 121.0, an 83.4 mm moment arm; against about 0.81 kg m^2 that is 0.58 rad/s. Each round contributes that impulse and they are summed, which is where a burst stops being three separate shots.\n"
+        "The two responses have DIFFERENT time constants on purpose, and that is the whole of why a burst climbs. The shoulder absorbs the rearward push and gives it back inside 60 ms, which is less than the 100 ms between rounds, so the linear recoil is spent before the next round fires and does not accumulate: every shot moves the rifle back the same 24.6 mm. The arms let the muzzle rise and bring it down over 220 ms, which is longer than the gap, so the second round lands on top of the first and the third on top of both. Peak climb is 3.53 degrees against the 2.33 a single round gives, lifting the muzzle 53 mm rather than 10.\n"
+        "Both time constants are chosen rather than derived, as the single-shot shoulder always was; what is derived is the impulse each round delivers. CheckAction reports both figures beside their single-shot values, so the accumulation is visible as a number and not just asserted. The rifle is back to battery, level, at the end of the cycle. The propellant gas is left out of the impulse, which would add roughly a third again, because no reference consulted gives a charge mass for 7.62x39.\n"
+        "\n"
+        "muzzle_flash: one unlit mesh at the muzzle, a spindle along the bore and six radial spikes about 140 mm long and 190 mm across, white-hot at the muzzle face and falling to orange at the tips through vertex colour. The AK-47 has no flash hider, so it is a broad open star rather than the narrow petals a pronged device makes. The size is judged, not measured. It is deliberately NOT given the lighting shader: nothing in lighting.fs adds emission, so a lit flash is a yellow plastic cone that gets darker away from the key light.\n"
+        "smoke: one lumpy unit blob drawn twenty-eight times per round, eighty-four times in all, with a scale, a fixed orientation and a translation, since a puff differs from its neighbours only in where it is, how far it has grown and how faded it is. Twenty-two puffs ride the gas jet forward from the muzzle at up to 3 m/s, six much fainter ones leave the ejection port once the action has opened it. Transparent and therefore also unlit: lighting.fs:73 computes alpha as texelColor.a*(tint.a + 1.0), which is at or above 1.0 for every tint, so that shader cannot carry transparency at all. Depth writes are off while the puffs draw and the smoke is drawn last, so they blend with each other and with the rifle instead of punching holes in one another.\n"
+        "Many faint puffs rather than a few solid ones, because a closed surface has a hard silhouette at any subdivision: at the alpha needed to be seen at all, one blob is a grey rock. Overlapping twenty-eight at about a sixth of that alpha, over a four-to-one spread of sizes, puts density in the middle and lets the edge fall off. That is the only soft edge available: a genuinely continuous plume needs a per-fragment falloff, which means a shader, and shaders belong to the harness rather than to any one model. Review rounds three and four both reported the puffs as still individually readable, which is a fair description of what this technique can do rather than a defect that more tuning will remove. The port puffs are much fainter than the muzzle ones on purpose: at the muzzle's density they drift between the camera and the receiver and veil the flank, and the ejection port is the thing a reviewer most needs to see into.\n"
+        "Each round lays down its own plume and they pile up, which is what a burst looks like. A puff lives 0.26 s, so the last round's has cleared before the cycle repeats; that fade is a concession to looping and not a claim about smoke, which in reality would still be hanging there. Drift is first-order drag to a terminal displacement rather than constant velocity: carried at its jet speed for a whole burst a puff ends up 800 mm downrange and out of frame, where real smoke sheds its momentum in a few tens of milliseconds and then hangs.\n"
+        "The case and the smoke are the two things NOT posed inside the rifle's recoil frame. Both are free bodies once they have left, so each is launched from where its opening was at the instant it let go and is independent of the rifle after that.\n"
+        "bolt_carrier: carrier body 140 long by 22 wide by 15 deep, a 14.8 diameter bolt protruding 14 forward of it with two locking lugs, a gas piston on the gas-tube axis with a 15 diameter head, and the charging handle. The head's rest position is read off the gas tube's front cap rather than typed: sited at z 118 to 142 it stood 23 mm proud of the tube in the open air ahead of the gas block whenever the carrier was forward, and withdrew out of sight as the carrier ran back. On the rifle it would sit in the gas block's cylinder, but this model's gas block is not bored, so just inside the tube's mouth is the nearest honest place for it. One mesh, because on the rifle they are one part: the handle is the only externally visible token of where the carrier is, and letting it be a second body would let the two disagree. Local origin on the carrier's front face at the gas-tube axis, so the pose is a bare translation aft.\n"
+        "trigger: local origin ON the pin at (y 174, z 550) that it swings about, so the pose is a bare rotation about local x, 9 degrees, about 5 mm at the shoe. The pin head now shown on both receiver flanks is drawn from those same two numbers rather than from a copy of them.\n"
+        "case: three of them, one per round, the same mesh drawn where its own round put it. A fired 7.62x39 case is 38.70 long on an 11.35 rim with a 10.07 shoulder and an 8.60 neck, from the cartridge drawing on the 7.62x39mm Wikipedia article. Round k's case is not drawn at all until round k fires, because until then it is a live cartridge in the magazine. It then rides that round's bolt face to the end of the rearward stroke, is kicked 12.1 up off it by the ejector, and is thrown at 5.0 m/s right, 1.25 up and 0.3 forward, tumbling 12 turns a second under gravity once it is clear.\n"
+        "Almost every number in that sentence was forced by the port rather than chosen, and the check is what forced them. A 17 mm high opening passing an 11.35 mm thick case leaves 5.65 mm of slack in total, so:\n"
+        "  it is ejected at the END of the stroke, not partway through, because its centre sits 19.35 from each end and it is only clear of the port's front edge at z 395 once the carrier has drawn it back past z 414.35. Ejecting it at 18 percent of a shot put 29 mm of its forward end through the receiver wall ahead of the port.\n"
+        "  it does not begin to tumble until its whole width is past the outer face of the plate, because while it is in the port it is still boxed in by the opening. A free tumble from the moment of extraction put brass at y 208.0 to 230.2 through a port of 211 to 228.\n"
+        "  it is kicked 9.7 up rather than leaving on the bore axis, because a case centred on the bore at y 204.4 does not line up with an opening that starts at 211.\n"
+        "  it leaves at 5.0 m/s, faster than it needs to look, because the crossing time is what sets how far it drifts vertically while it is in the opening. All three are checked, not one: they leave with the rifle at three different attitudes, since the climb has accumulated by the second and third.\n"
+        "They cross at y 212.2 to 227.0 and z 398.2 to 437.8, against an opening of y 211 to 228 by z 395 to 455: about a millimetre at each edge, sampled at 0.17 mm. That is a tight fit and it should be, because a real ejection port is a tight fit.\n"
+        "The check samples the case's SURFACE, sixteen points around it at each of five stations, not its centreline. Sampling the axis says nothing about a body 11.35 thick and it hid all three of the defects above: it reported the ejection as clearing while brass was going through the plate.\n"
+        "The case is never hidden. A first version switched it off at 85 percent of the cycle and the review in renders/ak47/v1 caught it vanishing while still a grid square from the rifle and well inside the frame. Flying it out of shot instead is not available: on one time scale for the whole model it has 0.076 s of real flight in a cycle, which carries it 152 mm, against a rifle 880 mm long. So it stays in flight to the end, and the case in the last frame and the case in the first are different rounds, because a repeating cycle fires a fresh one each time.\n"
+        "receiver: unchanged outside, cut away inside. A solid billet with two windows milled into it is enough while nothing behind them moves, and that is what this receiver was before the action was posed. Here the core is cut back to a real channel 23 wide with its floor at y 196, a full-height wall on each flank so the milled lightening cut still has a floor, and a rear wall at z 600. The right wall drops to the port sill over the ejection port, so the port is now a hole into the channel instead of a shallow recess, and the charging-handle slot is opened forward from z 380 so the handle has somewhere to sit and somewhere to run.\n"
+        "The channel's left wall, floor and rear wall are finished dark, and the carrier carries a bright 52 by 14 wear face on its right flank. Both are true of a receiver and a carrier that has cycled, and both are here because four review rounds running reported the ejection port as a barely changing recess: bare milled walls, a blued carrier and a bright patch on it are all mid greys at this camera distance, so nothing in the opening changed value as the carrier ran. Making the patch bigger did not fix that and was not the problem. A dark background behind a bright moving face was. Each liner is buried into the wall behind it rather than laid on its face, so no two surfaces are coincident.\n"
+        "\n"
+        "THE TRAVEL IS NOT A MEASURED FIGURE, AND THE MODEL IS INCONSISTENT ABOUT IT\n"
+        "No reference found gives a bolt carrier travel for the AK-47, so 72 mm is not measured: it is the largest travel this receiver admits, the carrier stopping 8 mm short of the channel's rear wall. CheckAction measures that at build time over 360 steps and reports it, together with the margin at the charging handle's slot, the piston head against BOTH ends of the gas tube, the trigger shoe against the guard's rear web, the recoil the momentum comes to and whether it is back in battery when the cycle repeats, and the height at which the case crosses the receiver wall against the ejection port's opening.\n"
+        "The trigger and the case are checked in the RIFLE's frame, not the world's, because everything they are checked against is bolted to a rifle that now recoils. Measuring them in the world compares a recoiled part against a limit that moved with it, which is what the first version of that check did: it reported the trigger 21 mm through a guard it never touches.\n"
+        "That last set of numbers exposes a real inconsistency in the geometry, and it is recorded rather than hidden: the charging-handle slot measured off ref_04 runs z 380 to 540, which with a 10 mm handle implies about 147 mm of travel, but the receiver's internal length between the front face at z 372 and the stock tang at z 606 leaves only 72 mm once a 140 mm carrier is inside it. Either the slot is longer than it should be, or the carrier is too long for it, or the receiver's internal length is short. The travel is set to the smaller of the two limits, so about 75 mm of the slot is never used, and a reviewer should read that unused slot as an open question rather than as a modelling slip.\n"
+        "Beating the 56.00 mm cartridge overall length is the one thing the travel has to do for a fresh round to have anywhere to go, and at 72 mm it does, by 16 mm.\n"
+        "\n"
+        "The internal action beyond this is not modelled and nothing here claims it: there is no hammer, no disconnector, no recoil spring, no chamber and no feed. The receiver is a billet with a channel cut in it, the magazine is a closed shell, and the round the trigger releases is not represented. What the model claims is the externally visible motion, which is the part a turntable of the rifle at rest cannot show.\n"
+        "\n"
+        "Some hidden geometry sits inside other solids: the piston rod runs at the gas-tube axis and so passes through the rear sight base, the receiver front block and the upper handguard, and the bolt in battery sits inside the barrel where the chamber would be. That is the convention the static geometry already works to, where the gas tube sits wholly inside the solid swept handguard wood because the wood is a solid section and not a shell. None of it is visible from outside, and the alternative is boring four measured solids to hide parts no assembled view ever shows.\n"
+        "\n"
+        "--anim holds the camera at yaw 20, a right-flank elevation turned twenty degrees toward the butt: the ejection port, the charging-handle slot and the trigger are all on that side, and the obliquity is what lets the case's outward travel read at all. Rendered without --anim the frames are a turntable of the first round's ignition: in battery, flash at full, no recoil yet.\n"
+        "\n"
+        "References attached to this model: ref_01 the bolt carrier, bolt and gas piston; ref_02 a trigger group; ref_03 a field-stripped AKM; ref_04 the measured Type 2 side elevation every dimension in this file comes from; ref_05 a Type 2 right-side photograph; ref_06 a receiver fabrication drawing; ref_07 two AKs in a case, the beech and laminate stocks side by side.\n"
+        "\n"
+        "--- the static geometry underneath the pose ---\n"
+        "\n"
+        "AK-47 with a Type 2 milled receiver and fixed wooden furniture, the configuration in references/ak47/ref_04.png.\n"
         "\n"
         "One world unit is 100 mm, so a grid square is 10 cm. Source constants are in millimetres: z runs aft from the muzzle face, y up from the magazine floorplate, x across; Vert() scales and recentres so the model sits centred on the grid.\n"
         "880 overall, bore axis at y 204.4, cleaning rod axis 191.0, gas tube axis 228.8, overall height 256.\n"
         "\n"
-        "The side elevation is measured, not estimated. ref_01 was thresholded to a silhouette and sampled column by column at 0.3915 mm/px, and every station below comes from that table:\n"
+        "The side elevation is measured, not estimated. ref_04 was thresholded to a silhouette and sampled column by column at 0.3915 mm/px, and every station below comes from that table:\n"
         "front sight block z 14 to 46, gas block 105 to 143, exposed gas tube 143 to 212, handguards 210 to 336, receiver 372 to 620 with its floor dropping 175 to 165 and its cover crown at 240, magazine 340 to 505, trigger guard 508 to 562, pistol grip 588 to 640, buttstock 640 to 880 with the toe at z 858 and the heel at 877.\n"
         "\n"
         "Seven parts.\n"
@@ -1229,13 +2168,16 @@ const Scene SCENE = {
         "Texture coordinates are in millimetres and divided by a per-material repeat length, so one repeat is a fixed physical size on every part: 320 by 145 for wood, 165 by 95 steel, 62 square grey, 128 by 96 blued. u runs along the part and v across it, so wood grain follows the barrel axis on the handguards and the comb line on the stock. Flat faces project planar by dominant face normal, tubes map axially and circumferentially with the axial coordinate taken from the world origin so the three barrel segments continue one pattern, and swept sections map by path length and section perimeter. Noise is periodic value noise so every map tiles.\n"
         "\n"
         "Widths are the weakest numbers here: no plan or front elevation was found, so only the receiver is measured (34.4 across, from the assembled rear receiver view in references/ak47/ref_06.jpg). Handguard 42, magazine 28, grip 31, and a buttstock tapering from 27 at the wrist to 40 at the butt, are all inferred from the receiver and should be treated as the least trustworthy dimensions in the model.\n"
-        "Known simplifications, all repeatedly flagged in renders/ak47/v*/critique.md and all consequences of building from hexahedra and swept sections: the magazine ribs are swept strips standing 0.3 proud that fade out at both ends rather than true pressings; the gas block, front sight base and handguard band are chamfered prisms rather than forgings flowing into rounded barrel collars; and the receiver flanks are flat plates with milled pockets rather than a body that changes section along its length.\n"
+        "Known simplifications, all repeatedly flagged in review and all consequences of building from hexahedra and swept sections: the magazine ribs are swept strips standing 0.3 proud that fade out at both ends rather than true pressings; the gas block, front sight base and handguard band are chamfered prisms rather than forgings flowing into rounded barrel collars; and the receiver flanks are flat plates with milled pockets rather than a body that changes section along its length.\n"
         "The texturing is diffuse only: there is no normal or specular map, so grain, pitting and machining marks change colour but never catch the light, and every surface stays as smooth as its mesh. Sweep and tube end caps project side grain rather than end grain, which is wrong on the muzzle face and on the butt under the buttplate but nowhere else visible.\n"
-        "The magazine ribs were queried in all four rounds as looking additive; references/ak47/ref_01.png shows the AK-47 steel magazine carrying raised longitudinal pressings, not recessed channels, so they stay raised and were only reduced in projection.",
+        "The magazine ribs were queried in four review rounds running as looking additive; references/ak47/ref_04.png shows the AK-47 steel magazine carrying raised longitudinal pressings, not recessed channels, so they stay raised and were only reduced in projection.",
     .init = Init,
     .unload = Unload,
+    .update = Update,
+    .duration = CYCLE,
+    .animYaw = 20.0f,
     .parts = PARTS,
-    .partCount = 7,
+    .partCount = (int)(sizeof(PARTS) / sizeof(PARTS[0])),
     .target = { 0.0f, 1.30f, 0.0f },
     .orbitRadius = 10.5f,
     .orbitHeight = 3.4f,
