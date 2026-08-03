@@ -33,12 +33,19 @@ typedef struct {
     float *vertices;
     float *normals;
     float *texcoords;
+    unsigned char *colors;
     unsigned short *indices;
     int vertexCount;
     int triangleCount;
     int vertexCap;
     int triangleCap;
 } Builder;
+
+// Weathering is baked per vertex rather than into a map, because a map here is shared by every instance of a type and repeats every metre, where a streak has to sit under the one sill it runs from.
+// Both shaders read the attribute -- lighting.fs computes tint = colDiffuse*fragColor at its line 42 -- so a vertex colour is a straight multiplier on whatever the texel and the instance tint already give, and darkening is the only thing it is used for here.
+//
+// The hook is a function of the position in the group's own frame, set around the piece being built and cleared afterwards, so a builder that wants no weathering asks for none and pays nothing but a null check.
+static float (*gShadeFn)(Vector3 p);
 
 static void Reserve(Builder *b, int verts, int tris)
 {
@@ -48,6 +55,7 @@ static void Reserve(Builder *b, int verts, int tris)
         b->vertices = (float *)MemRealloc(b->vertices, (size_t)cap * 3 * sizeof(float));
         b->normals = (float *)MemRealloc(b->normals, (size_t)cap * 3 * sizeof(float));
         b->texcoords = (float *)MemRealloc(b->texcoords, (size_t)cap * 2 * sizeof(float));
+        b->colors = (unsigned char *)MemRealloc(b->colors, (size_t)cap * 4 * sizeof(unsigned char));
         b->vertexCap = cap;
     }
     if (b->triangleCount + tris > b->triangleCap) {
@@ -70,6 +78,12 @@ static int VertUV(Builder *b, Vector3 p, Vector3 n, float u, float v)
     b->normals[i * 3 + 2] = n.z;
     b->texcoords[i * 2 + 0] = u;
     b->texcoords[i * 2 + 1] = v;
+    unsigned char k = 255;
+    if (gShadeFn) k = (unsigned char)Clamp(gShadeFn(p) * 255.0f, 0.0f, 255.0f);
+    b->colors[i * 4 + 0] = k;
+    b->colors[i * 4 + 1] = k;
+    b->colors[i * 4 + 2] = k;
+    b->colors[i * 4 + 3] = 255;
     return i;
 }
 
@@ -206,8 +220,8 @@ static void Tube(Builder *bd, Vector3 a, Vector3 b, float r0, float r1, int side
 // ---------------------------------------------------------------------------
 
 typedef enum {
-    MAT_PANEL, MAT_CONCRETE, MAT_PLINTH, MAT_ROOF,
-    MAT_GLASS, MAT_FRAME, MAT_METAL, MAT_TIMBER,
+    MAT_PANEL, MAT_JOINT, MAT_CONCRETE, MAT_PLINTH, MAT_ROOF,
+    MAT_GLASS, MAT_PANE, MAT_FRAME, MAT_METAL, MAT_RUST, MAT_TIMBER,
     MAT_GRASS, MAT_ASPHALT,
     MAT_BARK, MAT_BIRCH, MAT_LEAF, MAT_PAINT, MAT_RUBBER,
     MAT_FLASH, MAT_DUST,
@@ -228,6 +242,9 @@ static const Pass MAT_PASS[MAT_COUNT] = {
 // Every surface carries a map, so the colour lives in the texels and the material tint stays white; multiplying a coloured map by a coloured tint would darken it twice.
 static const Color MAT_COLOR[MAT_COUNT] = {
     [MAT_PANEL]    = WHITE,
+    [MAT_JOINT]    = WHITE,
+    [MAT_PANE]     = WHITE,
+    [MAT_RUST]     = WHITE,
     [MAT_CONCRETE] = WHITE,
     [MAT_PLINTH]   = WHITE,
     [MAT_ROOF]     = WHITE,
@@ -408,6 +425,38 @@ static Texture2D MakeRenderTexture(Color base, unsigned int seed, float blotch, 
     return Upload(img, TEXTURE_WRAP_REPEAT);
 }
 
+// Washed exposed aggregate -- the finish the 1-464's outer panels actually carry, and the thing references/panelka/ref_05.jpg makes unmistakable at the scale it was cropped to: dense pale pebbles of roughly a centimetre standing in a grey matrix, salt-and-pepper rather than mottled, at a contrast nothing else on the building comes near.
+// The first build had a smooth blotch here, and it is why every render of it read as poured grey: a mottle at half a metre is invisible past twenty, where a pebble field keeps its tooth because the eye reads its variance rather than its pattern.
+//
+// One texel is TEX_REPEAT_M/512 = 2 mm, so a pebble is five or six texels across, which is what the two high-frequency lattices set. Taking the larger of two independent fields rather than one is what makes the pebbles read as separate stones with matrix between them instead of as a noise wash: a single field spends half its area near its own mean, and two maxed spend most of theirs at one extreme or the other.
+static Texture2D MakePebbleTexture(Color matrix, Color pebble, unsigned int seed)
+{
+    const int S = 512;
+    Image img = NewImage(S);
+    Color *px = (Color *)img.data;
+    for (int y = 0; y < S; y++) {
+        for (int x = 0; x < S; x++) {
+            float u = (float)x / (float)S, v = (float)y / (float)S;
+            float a = ValueNoise(u, v, 96, seed);
+            float b = ValueNoise(u + 0.37f, v + 0.11f, 128, seed + 17u);
+            float stone = fmaxf(a, b);
+            // Anything past the threshold is a stone, and how far past sets how much of the light face it shows, so the field has a few bright ones rather than one flat tone.
+            float k = Clamp((stone - 0.58f) / 0.34f, 0.0f, 1.0f);
+            k = k * k * (3.0f - 2.0f * k);
+            Color c = {
+                (unsigned char)Lerp((float)matrix.r, (float)pebble.r, k),
+                (unsigned char)Lerp((float)matrix.g, (float)pebble.g, k),
+                (unsigned char)Lerp((float)matrix.b, (float)pebble.b, k),
+                255,
+            };
+            // A slow soiling over the top, so one panel is not uniformly the same grey across its whole 2.6 m.
+            px[y * S + x] = Shade(c, (Fbm(u, v, 3, seed + 41u, 3) - 0.5f) * 16.0f
+                                   + (Fbm(u, v, 224, seed + 59u, 2) - 0.5f) * 10.0f);
+        }
+    }
+    return Upload(img, TEXTURE_WRAP_REPEAT);
+}
+
 // Structural concrete seen where the skin has come off: greyer than the painted face, with the aggregate showing as a coarser mottle and a faint horizontal banding from the casting bed.
 static Texture2D MakeConcreteTexture(void)
 {
@@ -569,13 +618,21 @@ static Texture2D MakeLeafTexture(void)
 
 static void MakeTextures(void)
 {
-    MAT_TEX[MAT_PANEL]    = MakeRenderTexture((Color){ 118, 112, 100, 255 }, 3u, 20.0f, 12.0f);
+    MAT_TEX[MAT_PANEL]    = MakePebbleTexture((Color){ 78, 76, 70, 255 }, (Color){ 158, 154, 142, 255 }, 3u);
+    // The smooth cast border every panel carries round its aggregate field, and the reveal of every opening cut through it: lighter than the field's average and with none of its tooth, which is exactly what makes the joint grid read as a pale cross rather than as a shadow.
+    MAT_TEX[MAT_JOINT]    = MakeRenderTexture((Color){ 128, 126, 119, 255 }, 71u, 12.0f, 7.0f);
     MAT_TEX[MAT_CONCRETE] = MakeConcreteTexture();
     MAT_TEX[MAT_PLINTH]   = MakeRenderTexture((Color){ 66, 64, 60, 255 }, 51u, 16.0f, 14.0f);
     MAT_TEX[MAT_ROOF]     = MakeRoofTexture();
     MAT_TEX[MAT_GLASS]    = MakeGlassTexture();
-    MAT_TEX[MAT_FRAME]    = MakeRenderTexture((Color){ 146, 145, 138, 255 }, 83u, 8.0f, 10.0f);
+    // A window pane is not glass here, it is what is behind the glass: a net curtain, a dark room, a kitchen. So its map is authored near white and its whole colour is the per-instance tint, where MAT_GLASS is authored nearly black and is the same everywhere.
+    // Multiplying the two was the first attempt and every window came out black, because a curtain picked at 150 against a 24 texel leaves 14.
+    MAT_TEX[MAT_PANE]     = MakeRenderTexture((Color){ 228, 226, 222, 255 }, 233u, 10.0f, 8.0f);
+    // Authored white, because a window frame's colour is the flat's choice: the same mesh is a white PVC replacement in one apartment and painted timber in the next, and the difference is the per-instance tint.
+    MAT_TEX[MAT_FRAME]    = MakeRenderTexture((Color){ 208, 206, 200, 255 }, 83u, 8.0f, 10.0f);
     MAT_TEX[MAT_METAL]    = MakeMetalTexture();
+    // Downpipes and balcony steelwork, which ref_03 and ref_05 both show as rusted through rather than painted: the mottle is the rust rather than a bloom over paint.
+    MAT_TEX[MAT_RUST]     = MakeRenderTexture((Color){ 92, 58, 40, 255 }, 167u, 22.0f, 16.0f);
     MAT_TEX[MAT_TIMBER]   = MakeTimberTexture();
     MAT_TEX[MAT_GRASS]    = MakeGrassTexture();
     MAT_TEX[MAT_ASPHALT]  = MakeAsphaltTexture();
@@ -661,6 +718,7 @@ static void GroupFinish(Group *g, const char *name)
         mesh.vertices = b->vertices;
         mesh.normals = b->normals;
         mesh.texcoords = b->texcoords;
+        mesh.colors = b->colors;
         mesh.indices = b->indices;
         UploadMesh(&mesh, false);
 
@@ -726,7 +784,7 @@ static void GroupDrawPass(Group *g, Pass pass)
 }
 
 // Every group in the scene, in build order. The draw passes walk this rather than the part list, so a pass really does cover the whole model.
-#define MAX_GROUPS 64
+#define MAX_GROUPS 128
 static Group *gAll[MAX_GROUPS];
 static int gAllCount;
 
@@ -792,15 +850,24 @@ static const float BAY_W[BAYS] = { 2.6f, 3.2f, 2.6f, 2.6f, 2.6f, 3.2f, 2.6f };
 #define FACE_Z        (HALF_D + WALL_T * 0.5f)   // 5.91, outer face of the facade
 #define INNER_Z       (HALF_D - WALL_T * 0.5f)   // 5.61, inner face
 
-#define JOINT         0.045f   // half the groove between two panels: each face plate insets by this
+// Half the smooth border between two panels: each aggregate field insets by this, so two neighbours leave 2 x JOINT of cast render between them.
+// Measured off ref_05.jpg rather than chosen. Scaling that photograph by the 2.66 m storey -- four sills at 310 px apart -- gives 116.5 px/m, and the pale band between two panels reads 45 px both horizontally and vertically, so 0.386 m, or 0.19 m a side. 0.170 is that reading pulled in by a tenth, because a blurred pale-to-dark edge measures wide.
+// The first build had 0.045, and a 0.09 m band at 60 m is a third of a pixel: it is the single reason that build's facade rendered as an unbroken grey sheet with windows in it.
+#define JOINT         0.170f
 // How far every piece is grown past its own edge so that it knits into its neighbour instead of
 // meeting it on an exactly coincident plane. Two coplanar back-to-back faces are the one thing
 // this file draws hundreds of, and left touching they speckle along every joint: the rasterizer
 // picks between them per pixel and the facade comes out ruled with dashed lines. It is also the
 // honest construction, since a real panel is butted and caulked rather than laid edge to edge.
 #define KNIT          0.006f
-#define FACE_T        0.060f   // how far the face plate stands proud of the panel core
+// How far the aggregate field stands proud of the smooth border round it. ref_05 shows a shallow step, not the 0.06 m rebate the first build had, which at this border width would have thrown a 60 mm shadow all the way round every panel.
+#define FACE_T        0.022f
 #define CORE_T        (WALL_T - FACE_T)
+// How coarse a cell the face layer's decomposition may leave. It changes no geometry: it exists so the streak in PanelGrime has vertices to be written onto, and it is only asked of the layer whose face is seen. Cost is per panel *type*, not per instance -- there are eleven types behind 210 panels.
+#define PANEL_SEG     0.22f
+
+// How high the charges reach. It lives here with the storey it is counted in rather than down with the demolition, because the fines thrown out of the cut are placed long before the demolition's own constants are declared, and a second copy of the expression is how the two would drift apart.
+#define CUT_TOP       (PLINTH_Y + 2.0f * STOREY)
 
 #define ROOF_Y        (PLINTH_Y + FLOORS * STOREY)      // 14.25, top of the fifth-floor ceiling
 // Flat, which is the series' own specification and what ref_03 and ref_05 show; the pitched metal roofs in ref_02 and ref_07 are the re-roofing thousands of these got in the 1990s, not the building.
@@ -815,7 +882,7 @@ static const float BAY_W[BAYS] = { 2.6f, 3.2f, 2.6f, 2.6f, 2.6f, 3.2f, 2.6f };
 #define WIN_W26       1.300f
 #define WIN_W32       1.500f
 #define BDOOR_W       0.750f
-#define BDOOR_SILL    0.150f
+#define BDOOR_SILL    0.240f   // the threshold step up onto the balcony. It has to clear JOINT, or the door starts inside the border band round the panel and reads as running off the bottom of the aggregate field.
 #define BDOOR_H       2.100f
 // A stairwell landing is half a flight above the floor its panel stands on, so its window cannot share the apartments' rhythm.
 // One-storey panels cannot carry a light that straddles the slab, so consecutive storeys alternate between a low sill and a high one, which is the zigzag the real rhythm reads as from outside.
@@ -852,16 +919,22 @@ static float FloorY(int f) { return PLINTH_Y + (float)f * STOREY; }
 
 typedef struct { float x0, x1, y0, y1; } Rect;
 
-// One layer of a wall panel: a slab of thickness z0..z1 spanning the panel inset by `inset` on all four edges, with rectangular openings cut out of it.
+// The most openings any one panel here is cut with: a balcony bay's door and the window beside it.
+#define MAX_OPENINGS 2
+
+// One layer of a wall panel: a slab of thickness z0..z1 covering x0..x1 by y0..y1 of the panel's own frame, with rectangular openings cut out of it.
 //
-// Decomposed into horizontal bands at every opening edge and, within a band, into the x-segments the openings leave. Doing it that way rather than case by case means no opening count needs its own code, and every reveal face comes out as the side of a closed box rather than as a hole that has to be stitched.
+// It takes the layer's absolute extent rather than an inset off the panel, and that is what lets one function serve three jobs that pull in different directions: the cast core runs a hair past the panel edge so it knits into its neighbour, the aggregate field stops JOINT short of it so the border shows, and a fracture piece stops where the break is on one side and where the panel does on the other. An inset cannot say the last of those, and a single inset gave every fracture piece a border down its break, so an intact building read as though it had been built out of half-panels.
 //
-// Openings must be listed left to right; CheckPanelOpenings proves they are.
-static void WallLayer(Builder *b, float w, float h, float z0, float z1, float inset,
-                      const Rect *op, int nop)
+// Decomposed into horizontal bands at every opening edge and, within a band, into the x-segments the openings leave. Doing it that way rather than case by case means no opening count needs its own code, and every reveal face comes out as the side of a closed box rather than as a hole that has to be stitched. An opening that falls outside the layer is clipped to nothing by the same Clamp that trims one straddling its edge, so a fracture piece needs no opening list of its own.
+//
+// `seg`, when positive, is the coarsest cell the decomposition may leave: every band and every x-segment is then divided until no piece exceeds it. It changes no surface and exists only so gShadeFn has vertices to write a streak onto. A layer nobody sees the face of asks for 0 and stays at a dozen boxes.
+//
+// Openings must be listed left to right; CheckOpenings proves they are.
+static void WallLayer(Builder *b, float x0, float x1, float y0, float y1, float z0, float z1,
+                      const Rect *op, int nop, float seg)
 {
-    float x0 = -w * 0.5f + inset, x1 = w * 0.5f - inset;
-    float y0 = inset, y1 = h - inset;
+    if (x1 - x0 < 1e-5f || y1 - y0 < 1e-5f) return;
 
     float ys[10];
     int ny = 0;
@@ -881,55 +954,155 @@ static void WallLayer(Builder *b, float w, float h, float z0, float z1, float in
         if (ya < y0 - 1e-4f || yb > y1 + 1e-4f) continue;
         float ym = 0.5f * (ya + yb);
 
-        float cur = x0;
-        for (int i = 0; i < nop; i++) {
-            if (op[i].y0 > ym || op[i].y1 < ym) continue;
-            float a = Clamp(op[i].x0, x0, x1), c = Clamp(op[i].x1, x0, x1);
-            if (a > cur) Box(b, cur, a, ya, yb, z0, z1);
-            if (c > cur) cur = c;
+        int rows = (seg > 0.0f) ? (int)ceilf((yb - ya) / seg) : 1;
+        for (int r = 0; r < rows; r++) {
+            float ra = ya + (yb - ya) * (float)r / (float)rows;
+            float rb = ya + (yb - ya) * (float)(r + 1) / (float)rows;
+
+            float cur = x0;
+            for (int i = 0; i <= nop; i++) {
+                float a = x1, c = x1;
+                if (i < nop) {
+                    // The band is chosen by its own midpoint, so an opening either crosses the whole band or none of it.
+                    if (op[i].y0 > ym || op[i].y1 < ym) continue;
+                    a = Clamp(op[i].x0, x0, x1);
+                    c = Clamp(op[i].x1, x0, x1);
+                }
+                if (a > cur) {
+                    int cols = (seg > 0.0f) ? (int)ceilf((a - cur) / seg) : 1;
+                    for (int q = 0; q < cols; q++) {
+                        Box(b, cur + (a - cur) * (float)q / (float)cols,
+                            cur + (a - cur) * (float)(q + 1) / (float)cols, ra, rb, z0, z1);
+                    }
+                }
+                if (c > cur) cur = c;
+            }
         }
-        if (cur < x1) Box(b, cur, x1, ya, yb, z0, z1);
     }
 }
 
-// A whole facade panel: the structural core across its full width, plus a face plate standing FACE_T proud and inset JOINT all round. The inset is the joint: two neighbouring panels leave a 2*JOINT groove between their plates, which is the grid that makes a panel block read as one rather than as a rendered wall with windows in it.
-static void FacadePanel(Group *g, float w, float h, const Rect *op, int nop)
+// ---------------------------------------------------------------------------
+// Grime
+//
+// Concrete weathers where water runs over it, and on a panel block water runs from exactly three places: off every sill, off the top edge of every panel onto the one below, and down to the horizontal joint at each panel's foot, where it stops. Nothing in the first build recorded any of that, and a facade with no run-off on it reads as new whatever its texture is -- which is the one thing a 1962 building is not.
+//
+// It is written per vertex rather than into a map, because a map here is shared by every instance of a panel type and repeats every metre, where a streak has to start under the one sill it runs from. That is what PANEL_SEG's subdivision is for and the only thing it is for.
+// ---------------------------------------------------------------------------
+
+static Rect gGrimeOp[MAX_OPENINGS];
+static int gGrimeNop;
+static float gGrimeH;
+
+// How far a streak runs before the rain has washed the last of it out of the concrete.
+#define GRIME_RUN     1.15f
+
+static float PanelGrime(Vector3 p)
 {
-    WallLayer(&g->b[MAT_PANEL], w, h, -KNIT, CORE_T, -KNIT, op, nop);
-    WallLayer(&g->b[MAT_PANEL], w, h, CORE_T, WALL_T, JOINT, op, nop);
+    float d = 0.0f;
+
+    for (int i = 0; i < gGrimeNop; i++) {
+        float below = gGrimeOp[i].y0 - p.y;
+        if (below <= 0.0f || below > GRIME_RUN) continue;
+        // Darkest immediately under the sill and squared away downwards, which is how a stain that is being diluted the whole way down actually falls off.
+        float down = 1.0f - below / GRIME_RUN;
+        down *= down;
+        // Wider than the opening, because the run-off spreads as it leaves the sill's ends, and ramped over a width the subdivision can actually resolve.
+        float lx = (p.x - (gGrimeOp[i].x0 - 0.12f)) / 0.26f;
+        float rx = ((gGrimeOp[i].x1 + 0.12f) - p.x) / 0.26f;
+        float across = Clamp(fminf(lx, rx), 0.0f, 1.0f);
+        // Broken into separate runs rather than laid on as one even wash: a sill sheds where its drip is worn, not along its whole length.
+        float runs = 0.62f + 0.62f * Fbm(p.x * 0.47f + 0.31f, 0.17f, 10, 809u, 1);
+        d = fmaxf(d, 0.46f * down * across * fminf(1.0f, runs));
+    }
+
+    // Dirt gathers along the foot of every panel, where the run-off reaches the horizontal joint and goes no further.
+    d = fmaxf(d, 0.26f * Clamp((0.42f - p.y) / 0.42f, 0.0f, 1.0f));
+    // And along the head, which is what the panel above shed onto this one.
+    d = fmaxf(d, 0.16f * Clamp((p.y - (gGrimeH - 0.30f)) / 0.30f, 0.0f, 1.0f));
+
+    return 1.0f - d;
 }
 
-// The joinery that fills an opening: a frame around it, a centre mullion, a transom near the top, and a pane behind all three. Authored in the same frame as its panel, so it rides the same placement matrix, and recessed so the reveal reads as a reveal.
-#define GLZ_Z0        (CORE_T - 0.060f)
-#define GLZ_Z1        (CORE_T - 0.010f)
-#define GLZ_BAR       0.055f
+// A facade panel, or the slice xa..xb of one that a fracture leaves.
+//
+// Two layers: a cast core across the full width, and the exposed-aggregate field standing FACE_T proud of it and stopping JOINT short of every edge. That setback is the border, and it is the grid the whole facade reads by. The core carries the smooth render map rather than the aggregate one, so the border and the reveal of every opening come out pale and untoothed against the pebble field, which is what ref_05.jpg shows and what the first build -- one material for both layers -- could not show at any distance.
+//
+// A break is not an edge. Where the slice ends inside the panel, both layers run KNIT past it instead of setting back, so the two halves of an unbroken panel are indistinguishable from the whole one until they separate.
+static void FacadePiece(Group *g, float w, float h, const Rect *op, int nop, float xa, float xb)
+{
+    float hw = w * 0.5f;
+    bool atL = (xa <= -hw + 1e-4f), atR = (xb >= hw - 1e-4f);
 
-static void Glazing(Group *g, Rect r, bool transom)
+    WallLayer(&g->b[MAT_JOINT], atL ? -hw - KNIT : xa - KNIT, atR ? hw + KNIT : xb + KNIT,
+              -KNIT, h + KNIT, -KNIT, CORE_T, op, nop, 0.0f);
+
+    // Only the layer whose face the weather actually reaches. The core is the reveal of every opening and the panel's back, and neither of those is rained on.
+    for (int i = 0; i < nop && i < MAX_OPENINGS; i++) gGrimeOp[i] = op[i];
+    gGrimeNop = (nop < MAX_OPENINGS) ? nop : MAX_OPENINGS;
+    gGrimeH = h;
+    gShadeFn = PanelGrime;
+    WallLayer(&g->b[MAT_PANEL], atL ? -hw + JOINT : xa - KNIT, atR ? hw - JOINT : xb + KNIT,
+              JOINT, h - JOINT, CORE_T, WALL_T, op, nop, PANEL_SEG);
+    gShadeFn = NULL;
+}
+
+static void FacadePanel(Group *g, float w, float h, const Rect *op, int nop)
+{
+    FacadePiece(g, w, h, op, nop, -w * 0.5f, w * 0.5f);
+}
+
+// The joinery that fills an opening, and the pane behind it. Authored in the same frame as its panel, so it rides the same placement matrix.
+//
+// How far back it sits is measured from the *outer* face rather than derived from the core, so the reveal stays 0.105 m whatever the aggregate field's thickness is later set to. Deriving it from CORE_T is how the reveal quietly vanished when FACE_T came down from 0.060 to 0.022.
+#define GLZ_INSET     0.105f
+#define GLZ_Z1        (WALL_T - GLZ_INSET)
+#define GLZ_Z0        (GLZ_Z1 - 0.050f)
+
+// Two generations of window, which is the loudest thing about a khrushchyovka facade today and the thing the first build had none of: ref_03, ref_05, ref_06 and ref_07 all show a chequerboard of white plastic replacements against the original painted timber, flat by flat, because each flat replaced its own when it could afford to.
+// The plastic one is two lights on an off-centre mullion and nothing else. The original is heavier in section, splits down the middle, and carries a transom across the full width with a small hinged vent (a fortochka) in one upper light, which is the detail that dates it.
+#define GLZ_BAR_PVC   0.052f
+#define GLZ_BAR_TIM   0.072f
+
+static void Joinery(Group *g, Rect r, bool pvc)
 {
     Builder *f = &g->b[MAT_FRAME];
-    float ix0 = r.x0 + GLZ_BAR, ix1 = r.x1 - GLZ_BAR;
-    float iy0 = r.y0 + GLZ_BAR, iy1 = r.y1 - GLZ_BAR;
+    float bar = pvc ? GLZ_BAR_PVC : GLZ_BAR_TIM;
+    float ix0 = r.x0 + bar, ix1 = r.x1 - bar;
+    float iy0 = r.y0 + bar, iy1 = r.y1 - bar;
+    if (ix1 - ix0 < 0.10f || iy1 - iy0 < 0.10f) return;
 
     Box(f, r.x0, r.x1, r.y0, iy0, GLZ_Z0, GLZ_Z1);
     Box(f, r.x0, r.x1, iy1, r.y1, GLZ_Z0, GLZ_Z1);
     Box(f, r.x0, ix0, iy0, iy1, GLZ_Z0, GLZ_Z1);
     Box(f, ix1, r.x1, iy0, iy1, GLZ_Z0, GLZ_Z1);
 
-    float mx = 0.5f * (r.x0 + r.x1);
-    Box(f, mx - GLZ_BAR * 0.5f, mx + GLZ_BAR * 0.5f, iy0, iy1, GLZ_Z0, GLZ_Z1);
-    if (transom) {
-        float ty = iy1 - (iy1 - iy0) * 0.28f;
-        Box(f, ix0, ix1, ty - GLZ_BAR * 0.5f, ty + GLZ_BAR * 0.5f, GLZ_Z0, GLZ_Z1);
+    if (pvc) {
+        // The mullion sits off centre, which is what a two-sash replacement unit does: one wide fixed light and one narrow opener.
+        float mx = r.x0 + (r.x1 - r.x0) * 0.62f;
+        Box(f, mx - bar * 0.5f, mx + bar * 0.5f, iy0, iy1, GLZ_Z0, GLZ_Z1);
+        return;
     }
 
-    // The pane sits behind the frame rather than flush with it, so the frame casts across it.
-    Box(&g->b[MAT_GLASS], ix0, ix1, iy0, iy1, GLZ_Z0 - 0.030f, GLZ_Z0 - 0.010f);
+    float mx = 0.5f * (r.x0 + r.x1);
+    float ty = iy1 - (iy1 - iy0) * 0.30f;
+    Box(f, mx - bar * 0.5f, mx + bar * 0.5f, iy0, iy1, GLZ_Z0, GLZ_Z1);
+    Box(f, ix0, ix1, ty - bar * 0.5f, ty + bar * 0.5f, GLZ_Z0, GLZ_Z1);
+    // The fortochka: a small hinged vent in the upper light nearest the mullion, standing a little proud of the sash it is set into.
+    Box(f, mx + bar * 0.5f, mx + bar * 0.5f + (ix1 - mx) * 0.52f, ty + bar * 0.5f, iy1, GLZ_Z1, GLZ_Z1 + 0.016f);
 }
 
-// A window sill: the one moulding on a khrushchyovka facade that is not flat, and the only thing that stops a window reading as a sticker.
+// The pane is its own group, not part of the joinery, for the same reason the car's glass is not part of its body: a per-instance tint reaches every material a group owns, and what varies here is what shows *behind* the glass -- a curtain, a dark room, a kitchen -- while the frame stays whatever the flat painted it.
+// It sits behind the joinery rather than flush, so the frame casts across it.
+static void Pane(Group *g, Rect r)
+{
+    float bar = GLZ_BAR_PVC;
+    Box(&g->b[MAT_PANE], r.x0 + bar, r.x1 - bar, r.y0 + bar, r.y1 - bar, GLZ_Z0 - 0.030f, GLZ_Z0 - 0.010f);
+}
+
+// A window sill: the one moulding on a khrushchyovka facade that is not flat, and the only thing that stops a window reading as a sticker. Cast render rather than aggregate, which is what ref_05 shows and what every sill on a panel block is.
 static void Sill(Group *g, Rect r)
 {
-    Box(&g->b[MAT_PANEL], r.x0 - 0.060f, r.x1 + 0.060f, r.y0 - 0.070f, r.y0, WALL_T - 0.020f, WALL_T + 0.060f);
+    Box(&g->b[MAT_JOINT], r.x0 - 0.060f, r.x1 + 0.060f, r.y0 - 0.075f, r.y0, WALL_T - 0.020f, WALL_T + 0.055f);
 }
 
 // ---------------------------------------------------------------------------
@@ -939,15 +1112,93 @@ static void Sill(Group *g, Rect r)
 // ---------------------------------------------------------------------------
 
 typedef enum {
-    FR_P26, FR_P32, FR_P32B, FR_PSTAIR, FR_PSTAIR2, FR_PDOOR, FR_PEND,
-    FR_G26, FR_G32, FR_G32B, FR_GSTAIR, FR_GSTAIR2, FR_GDOOR,
+    // Facade panels. Each of the four that repeat enough to be worth it also exists as the two halves it fractures into; the stairwell and entrance panels come down whole.
+    FR_P26, FR_P26L, FR_P26R,
+    FR_P32, FR_P32L, FR_P32R,
+    FR_P32B, FR_P32BL, FR_P32BR,
+    FR_PEND, FR_PENDL, FR_PENDR,
+    FR_PSTAIR, FR_PSTAIR2, FR_PDOOR,
+    // Joinery, in both generations where a flat has a say in it.
+    FR_J26P, FR_J26T, FR_J32P, FR_J32T, FR_J32BP, FR_J32BT, FR_JSTAIR, FR_JSTAIR2, FR_JDOOR,
+    // Panes, separate from the joinery so they can carry the curtain behind them.
+    FR_Q26, FR_Q32, FR_Q32B, FR_QSTAIR, FR_QSTAIR2, FR_QDOOR,
+    // Fittings the residents hung on it afterwards.
+    FR_BARS, FR_AC, FR_PIPE,
+    // Structure. A slab and a cross wall are each authored as one piece of the several they are laid in, so the pile is made of pieces the length of a room rather than of intact eleven-metre plates.
     FR_SLAB26, FR_SLAB32, FR_ROOF26, FR_ROOF32,
     FR_XWALL, FR_SPINE26, FR_SPINE32,
-    FR_BALC, FR_BALCG, FR_PAR26, FR_PAR32, FR_PAREND, FR_CANOPY, FR_VENT, FR_PIPE, FR_MAST,
-    FR_RUBBLE,
+    // A balcony in three pieces, so each carries its own colour and each leaves separately.
+    FR_BALC, FR_BALCSHEET, FR_BALCGLZ, FR_BALCPANE,
+    FR_PAR26, FR_PAR32, FR_PAREND, FR_CANOPY, FR_VENT, FR_MAST,
+    FR_RUBBLE, FR_RUBBLE2,
     FR_BIRCH, FR_MAPLE, FR_CARBODY, FR_CARTRIM, FR_BENCH, FR_RUGFRAME, FR_LAMP, FR_BIN,
     FR_COUNT
 } FragType;
+
+// What a fragment is, for the two questions the collapse asks of every one of them: when it lets go, and how hard.
+//
+// A table rather than a range test on the enum. The first build asked `type <= FR_PEND` for "is this skin" and `type >= FR_G26 && type <= FR_GDOOR` for "is this glass", which is correct exactly as long as nobody inserts a type, and this revision inserts thirty. A misfiled type there is silent: the piece simply falls with the wrong timing, in a scene where several hundred pieces are falling at once.
+typedef enum {
+    FC_SKIN,      // facade panel: held on by nothing once the cross wall behind it is gone
+    FC_GLASS,     // goes at the shock, wherever in the building it is
+    FC_FITTING,   // bolted to the skin, and leaves with it
+    FC_STRUCT,    // slabs, cross walls, the spine: what the pile is made of
+    FC_BALCONY,   // a cantilever with nothing above it, so it fails early
+    FC_RUBBLE,    // material that had no separate existence until the building broke
+    FC_YARD,      // not destroyed, but not untouched either
+} FragClass;
+
+static const FragClass FR_CLASS[FR_COUNT] = {
+    [FR_P26] = FC_SKIN, [FR_P26L] = FC_SKIN, [FR_P26R] = FC_SKIN,
+    [FR_P32] = FC_SKIN, [FR_P32L] = FC_SKIN, [FR_P32R] = FC_SKIN,
+    [FR_P32B] = FC_SKIN, [FR_P32BL] = FC_SKIN, [FR_P32BR] = FC_SKIN,
+    [FR_PEND] = FC_SKIN, [FR_PENDL] = FC_SKIN, [FR_PENDR] = FC_SKIN,
+    [FR_PSTAIR] = FC_SKIN, [FR_PSTAIR2] = FC_SKIN, [FR_PDOOR] = FC_SKIN,
+    [FR_J26P] = FC_GLASS, [FR_J26T] = FC_GLASS, [FR_J32P] = FC_GLASS, [FR_J32T] = FC_GLASS,
+    [FR_J32BP] = FC_GLASS, [FR_J32BT] = FC_GLASS, [FR_JSTAIR] = FC_GLASS,
+    [FR_JSTAIR2] = FC_GLASS, [FR_JDOOR] = FC_GLASS,
+    [FR_Q26] = FC_GLASS, [FR_Q32] = FC_GLASS, [FR_Q32B] = FC_GLASS,
+    [FR_QSTAIR] = FC_GLASS, [FR_QSTAIR2] = FC_GLASS, [FR_QDOOR] = FC_GLASS,
+    [FR_BARS] = FC_FITTING, [FR_AC] = FC_FITTING, [FR_PIPE] = FC_FITTING,
+    [FR_SLAB26] = FC_STRUCT, [FR_SLAB32] = FC_STRUCT,
+    [FR_ROOF26] = FC_STRUCT, [FR_ROOF32] = FC_STRUCT,
+    [FR_XWALL] = FC_STRUCT, [FR_SPINE26] = FC_STRUCT, [FR_SPINE32] = FC_STRUCT,
+    [FR_BALC] = FC_BALCONY, [FR_BALCSHEET] = FC_BALCONY, [FR_BALCGLZ] = FC_BALCONY,
+    // The pane goes at the shock like every other pane in the building, not with the balcony it is fixed to.
+    [FR_BALCPANE] = FC_GLASS,
+    [FR_PAR26] = FC_STRUCT, [FR_PAR32] = FC_STRUCT, [FR_PAREND] = FC_STRUCT,
+    [FR_CANOPY] = FC_STRUCT, [FR_VENT] = FC_STRUCT, [FR_MAST] = FC_FITTING,
+    [FR_RUBBLE] = FC_RUBBLE, [FR_RUBBLE2] = FC_RUBBLE,
+    [FR_BIRCH] = FC_YARD, [FR_MAPLE] = FC_YARD, [FR_CARBODY] = FC_YARD, [FR_CARTRIM] = FC_YARD,
+    [FR_BENCH] = FC_YARD, [FR_RUGFRAME] = FC_YARD, [FR_LAMP] = FC_YARD, [FR_BIN] = FC_YARD,
+};
+
+// Designated rather than positional, so a type inserted in the middle of the enum cannot silently shift every name after it onto the wrong mesh. The names only reach a diagnostic, which is exactly why nobody would have noticed.
+static const char *TYPE_NAME[FR_COUNT] = {
+    [FR_P26] = "p26", [FR_P26L] = "p26.l", [FR_P26R] = "p26.r",
+    [FR_P32] = "p32", [FR_P32L] = "p32.l", [FR_P32R] = "p32.r",
+    [FR_P32B] = "p32b", [FR_P32BL] = "p32b.l", [FR_P32BR] = "p32b.r",
+    [FR_PEND] = "pend", [FR_PENDL] = "pend.l", [FR_PENDR] = "pend.r",
+    [FR_PSTAIR] = "pstair", [FR_PSTAIR2] = "pstair2", [FR_PDOOR] = "pdoor",
+    [FR_J26P] = "j26.pvc", [FR_J26T] = "j26.timber",
+    [FR_J32P] = "j32.pvc", [FR_J32T] = "j32.timber",
+    [FR_J32BP] = "j32b.pvc", [FR_J32BT] = "j32b.timber",
+    [FR_JSTAIR] = "jstair", [FR_JSTAIR2] = "jstair2", [FR_JDOOR] = "jdoor",
+    [FR_Q26] = "pane26", [FR_Q32] = "pane32", [FR_Q32B] = "pane32b",
+    [FR_QSTAIR] = "panestair", [FR_QSTAIR2] = "panestair2", [FR_QDOOR] = "panedoor",
+    [FR_BARS] = "bars", [FR_AC] = "aircon", [FR_PIPE] = "pipe",
+    [FR_SLAB26] = "slab26", [FR_SLAB32] = "slab32",
+    [FR_ROOF26] = "roof26", [FR_ROOF32] = "roof32",
+    [FR_XWALL] = "xwall", [FR_SPINE26] = "spine26", [FR_SPINE32] = "spine32",
+    [FR_BALC] = "balc", [FR_BALCSHEET] = "balc.sheet",
+    [FR_BALCGLZ] = "balc.enclosure", [FR_BALCPANE] = "balc.pane",
+    [FR_PAR26] = "par26", [FR_PAR32] = "par32", [FR_PAREND] = "parend",
+    [FR_CANOPY] = "canopy", [FR_VENT] = "vent", [FR_MAST] = "mast",
+    [FR_RUBBLE] = "rubble", [FR_RUBBLE2] = "rubble.small",
+    [FR_BIRCH] = "birch", [FR_MAPLE] = "maple",
+    [FR_CARBODY] = "carbody", [FR_CARTRIM] = "cartrim",
+    [FR_BENCH] = "bench", [FR_RUGFRAME] = "rugframe", [FR_LAMP] = "lamp", [FR_BIN] = "bin",
+};
 
 typedef struct {
     FragType type;
@@ -958,7 +1209,7 @@ typedef struct {
     float shade;     // per-instance brightness, so 105 copies of one mesh are not 105 identical panels
 } Fragment;
 
-#define MAX_FRAG 1500
+#define MAX_FRAG 3200
 static Fragment gFrag[MAX_FRAG];
 static int gFragCount;
 
@@ -1009,49 +1260,131 @@ static Rect WinRect(float winW)
     return (Rect){ -winW * 0.5f, winW * 0.5f, WIN_SILL, WIN_SILL + WIN_H };
 }
 
+// The seven panels the block is cut from, and the one place their openings are written down.
+//
+// The first build wrote each opening rectangle out twice, once for the builder and once for the check that proves it fits, which meant the check could only ever confirm that the literals had been copied correctly. Both now read the same function, so the check tests the panel that is actually built.
+typedef enum { PK_26, PK_32, PK_32B, PK_STAIR, PK_STAIR2, PK_DOOR, PK_END, PK_COUNT } PanelKind;
+
+// The gable is four panels across its 11.82 m depth, not two. ref_05.jpg reads four columns across its end wall at the same panel-border pitch the facade carries, and the first build's two 5.91 m slabs gave the gable a grid four times coarser than the rest of the building, which is why it rendered as a blank grey wall from any distance.
+#define END_W         (FACE_Z * 0.5f)
+
+static const float PANEL_W[PK_COUNT] = { 2.6f, 3.2f, 3.2f, 2.6f, 2.6f, 2.6f, END_W };
+
+// Where each kind cracks, in its own frame. A panel goes at the side of an opening, which is where its section is thinnest; the blank gable has no opening, so its break is simply off centre, because two congruent halves read as a cut rather than as a fracture.
+static const float PANEL_BREAK[PK_COUNT] = {
+    -WIN_W26 * 0.5f, -WIN_W32 * 0.5f, -0.200f, 0.0f, 0.0f, 0.0f, 0.55f,
+};
+
+// Which fragment types a kind builds: the whole panel, and the two halves, which are the whole one again for a kind that is not worth fracturing.
+typedef struct { FragType whole, left, right; } PanelTypes;
+
+static const PanelTypes PANEL_TYPE[PK_COUNT] = {
+    [PK_26]     = { FR_P26, FR_P26L, FR_P26R },
+    [PK_32]     = { FR_P32, FR_P32L, FR_P32R },
+    [PK_32B]    = { FR_P32B, FR_P32BL, FR_P32BR },
+    [PK_STAIR]  = { FR_PSTAIR, FR_PSTAIR, FR_PSTAIR },
+    [PK_STAIR2] = { FR_PSTAIR2, FR_PSTAIR2, FR_PSTAIR2 },
+    [PK_DOOR]   = { FR_PDOOR, FR_PDOOR, FR_PDOOR },
+    [PK_END]    = { FR_PEND, FR_PENDL, FR_PENDR },
+};
+
+// Openings, left to right, which is what WallLayer's single sweep across a band assumes and what CheckOpenings proves.
+static int PanelOpenings(PanelKind k, Rect *out)
+{
+    switch (k) {
+        case PK_26: out[0] = WinRect(WIN_W26); return 1;
+        case PK_32: out[0] = WinRect(WIN_W32); return 1;
+        case PK_32B:
+            // A balcony bay: the door on the left, a window beside it.
+            out[0] = (Rect){ -1.300f, -1.300f + BDOOR_W, BDOOR_SILL, BDOOR_SILL + BDOOR_H };
+            out[1] = (Rect){ 0.100f, 0.100f + 1.200f, WIN_SILL, WIN_SILL + WIN_H };
+            return 2;
+        // The stairwell: one tall narrow light per storey, its sill well above an apartment's because the landing it serves is half a flight up. The real thing staggers a window per half-flight; this is one per storey, which is as far as a one-storey panel can go.
+        case PK_STAIR:
+            out[0] = (Rect){ -STAIR_W * 0.5f, STAIR_W * 0.5f, STAIR_SILL_LO, STAIR_SILL_LO + STAIR_H };
+            return 1;
+        case PK_STAIR2:
+            out[0] = (Rect){ -STAIR_W * 0.5f, STAIR_W * 0.5f, STAIR_SILL_HI, STAIR_SILL_HI + STAIR_H };
+            return 1;
+        case PK_DOOR:
+            out[0] = (Rect){ -ENTRY_W * 0.5f, ENTRY_W * 0.5f, 0.0f, ENTRY_H };
+            return 1;
+        // The end wall: two blank panels per floor, each spanning half the depth. Blank is the point -- ref_02, ref_03 and ref_07 all show a gable with no openings at all, which is why ref_04 exists to show one painted instead; ref_05 is the variant that does put two window columns in its gable.
+        default: return 0;
+    }
+}
+
+static const char *PANEL_KIND_NAME[PK_COUNT] = {
+    "2.6 m window panel", "3.2 m window panel", "balcony panel",
+    "stairwell panel, low sill", "stairwell panel, high sill", "entrance panel", "end wall panel",
+};
+
 static void BuildFacadeTypes(void)
 {
-    // A plain bay: one window, centred.
-    Rect w26 = WinRect(WIN_W26);
-    FacadePanel(&gType[FR_P26], 2.6f, STOREY, &w26, 1);
-    Sill(&gType[FR_P26], w26);
-    Glazing(&gType[FR_G26], w26, true);
+    for (int k = 0; k < PK_COUNT; k++) {
+        Rect op[MAX_OPENINGS];
+        int nop = PanelOpenings((PanelKind)k, op);
+        float w = PANEL_W[k];
+        const PanelTypes *pt = &PANEL_TYPE[k];
 
-    Rect w32 = WinRect(WIN_W32);
-    FacadePanel(&gType[FR_P32], 3.2f, STOREY, &w32, 1);
-    Sill(&gType[FR_P32], w32);
-    Glazing(&gType[FR_G32], w32, true);
+        FacadePanel(&gType[pt->whole], w, STOREY, op, nop);
+        if (pt->left != pt->whole) {
+            // A panel cracks at the side of an opening, which is where the section is thinnest and where a real one goes. PK_END has no opening, so its break is simply off centre, because two halves that are congruent read as a cut rather than as a fracture.
+            FacadePiece(&gType[pt->left], w, STOREY, op, nop, -w * 0.5f, PANEL_BREAK[k]);
+            FacadePiece(&gType[pt->right], w, STOREY, op, nop, PANEL_BREAK[k], w * 0.5f);
+        }
 
-    // A balcony bay: the door on the left, a window beside it. Listed left to right, which WallLayer requires and CheckPanelOpenings proves.
-    Rect bal[2] = {
-        { -1.300f, -1.300f + BDOOR_W, BDOOR_SILL, BDOOR_SILL + BDOOR_H },
-        { 0.100f, 0.100f + 1.200f, WIN_SILL, WIN_SILL + WIN_H },
-    };
-    FacadePanel(&gType[FR_P32B], 3.2f, STOREY, bal, 2);
-    Sill(&gType[FR_P32B], bal[1]);
-    Glazing(&gType[FR_G32B], bal[0], false);
-    Glazing(&gType[FR_G32B], bal[1], true);
+        // The sill belongs to the piece the window's own side of the break is on, so it neither doubles nor vanishes when the panel fractures.
+        for (int i = 0; i < nop; i++) {
+            if (op[i].y0 < 0.05f) continue;   // a doorway reaches the floor and has no sill
+            Sill(&gType[pt->whole], op[i]);
+            if (pt->left != pt->whole) {
+                Sill(&gType[(0.5f * (op[i].x0 + op[i].x1) < PANEL_BREAK[k]) ? pt->left : pt->right], op[i]);
+            }
+        }
+    }
 
-    // The stairwell: one tall narrow light per storey, its sill well above an apartment's because the landing it serves is half a flight up. The real thing staggers a window per half-flight; this is one per storey, which is as far as a one-storey panel can go.
-    Rect stLo = { -STAIR_W * 0.5f, STAIR_W * 0.5f, STAIR_SILL_LO, STAIR_SILL_LO + STAIR_H };
-    Rect stHi = { -STAIR_W * 0.5f, STAIR_W * 0.5f, STAIR_SILL_HI, STAIR_SILL_HI + STAIR_H };
-    FacadePanel(&gType[FR_PSTAIR], 2.6f, STOREY, &stLo, 1);
-    Glazing(&gType[FR_GSTAIR], stLo, false);
-    FacadePanel(&gType[FR_PSTAIR2], 2.6f, STOREY, &stHi, 1);
-    Glazing(&gType[FR_GSTAIR2], stHi, false);
+    // Joinery and panes, one pair per opening that a flat has any say over. The two generations differ in section, in how they divide and in what the flat paid for them: ref_03, ref_05, ref_06 and ref_07 all show the chequerboard.
+    Rect w26 = WinRect(WIN_W26), w32 = WinRect(WIN_W32);
+    Rect bal[MAX_OPENINGS];
+    PanelOpenings(PK_32B, bal);
 
-    // The entrance: a doorway to the floor, with a fanlight over it.
-    Rect en = { -ENTRY_W * 0.5f, ENTRY_W * 0.5f, 0.0f, ENTRY_H };
-    FacadePanel(&gType[FR_PDOOR], 2.6f, STOREY, &en, 1);
+    Joinery(&gType[FR_J26P], w26, true);
+    Joinery(&gType[FR_J26T], w26, false);
+    Pane(&gType[FR_Q26], w26);
+
+    Joinery(&gType[FR_J32P], w32, true);
+    Joinery(&gType[FR_J32T], w32, false);
+    Pane(&gType[FR_Q32], w32);
+
+    for (int pvc = 0; pvc < 2; pvc++) {
+        Group *g = &gType[pvc ? FR_J32BP : FR_J32BT];
+        Joinery(g, bal[0], pvc != 0);
+        Joinery(g, bal[1], pvc != 0);
+    }
+    Pane(&gType[FR_Q32B], bal[0]);
+    Pane(&gType[FR_Q32B], bal[1]);
+
+    // The stairwell is communal, so nobody replaces its windows and both are the original timber.
+    Rect stLo[MAX_OPENINGS], stHi[MAX_OPENINGS];
+    PanelOpenings(PK_STAIR, stLo);
+    PanelOpenings(PK_STAIR2, stHi);
+    Joinery(&gType[FR_JSTAIR], stLo[0], false);
+    Pane(&gType[FR_QSTAIR], stLo[0]);
+    Joinery(&gType[FR_JSTAIR2], stHi[0], false);
+    Pane(&gType[FR_QSTAIR2], stHi[0]);
+
+    // The entrance: two steel leaves with a rebate between them, set back in the reveal, and a fanlight above.
     {
-        Builder *m = &gType[FR_GDOOR].b[MAT_METAL];
-        // Two leaves with a rebate between them, set back in the reveal, and a fanlight above.
+        Rect en[MAX_OPENINGS];
+        PanelOpenings(PK_DOOR, en);
+        Builder *m = &gType[FR_JDOOR].b[MAT_METAL];
         float leafTop = ENTRY_H - 0.500f;
-        Box(m, en.x0 + 0.040f, -0.020f, 0.020f, leafTop, GLZ_Z0, GLZ_Z1);
-        Box(m, 0.020f, en.x1 - 0.040f, 0.020f, leafTop, GLZ_Z0, GLZ_Z1);
-        Box(m, en.x0, en.x1, leafTop, leafTop + 0.070f, GLZ_Z0, GLZ_Z1);
-        Box(&gType[FR_GDOOR].b[MAT_GLASS], en.x0 + 0.060f, en.x1 - 0.060f,
-            leafTop + 0.070f, en.y1 - 0.040f, GLZ_Z0 - 0.030f, GLZ_Z0 - 0.010f);
+        Box(m, en[0].x0 + 0.040f, -0.020f, 0.020f, leafTop, GLZ_Z0, GLZ_Z1);
+        Box(m, 0.020f, en[0].x1 - 0.040f, 0.020f, leafTop, GLZ_Z0, GLZ_Z1);
+        Box(m, en[0].x0, en[0].x1, leafTop, leafTop + 0.070f, GLZ_Z0, GLZ_Z1);
+        Box(&gType[FR_QDOOR].b[MAT_GLASS], en[0].x0 + 0.060f, en[0].x1 - 0.060f,
+            leafTop + 0.070f, en[0].y1 - 0.040f, GLZ_Z0 - 0.030f, GLZ_Z0 - 0.010f);
         // Handles, on the meeting stiles.
         Box(m, -0.130f, -0.060f, 1.000f, 1.120f, GLZ_Z1, GLZ_Z1 + 0.060f);
         Box(m, 0.060f, 0.130f, 1.000f, 1.120f, GLZ_Z1, GLZ_Z1 + 0.060f);
@@ -1059,22 +1392,52 @@ static void BuildFacadeTypes(void)
         // A bulkhead lamp over the door and the enamel number plate beside it. Both hang off ENTRY_H rather than off a copy of it, so they follow the doorway if it ever changes.
         float lampY = ENTRY_H + 0.180f;
         Tube(m, (Vector3){ 0.0f, lampY, WALL_T }, (Vector3){ 0.0f, lampY, WALL_T + 0.150f }, 0.075f, 0.115f, 12, false, false);
-        Box(&gType[FR_GDOOR].b[MAT_GLASS], -0.105f, 0.105f, lampY - 0.105f, lampY + 0.105f, WALL_T + 0.148f, WALL_T + 0.160f);
-        Box(&gType[FR_GDOOR].b[MAT_FRAME], 0.520f, 0.880f, ENTRY_H - 0.240f, ENTRY_H + 0.020f, WALL_T, WALL_T + 0.018f);
+        Box(&gType[FR_QDOOR].b[MAT_GLASS], -0.105f, 0.105f, lampY - 0.105f, lampY + 0.105f, WALL_T + 0.148f, WALL_T + 0.160f);
+        Box(&gType[FR_JDOOR].b[MAT_FRAME], 0.520f, 0.880f, ENTRY_H - 0.240f, ENTRY_H + 0.020f, WALL_T, WALL_T + 0.018f);
     }
 
-    // The end wall: two blank panels per floor, each spanning half the depth. Blank is the point -- ref_02, ref_05 and ref_07 all show a gable with no openings at all, which is why ref_04 exists to show one painted instead.
-    FacadePanel(&gType[FR_PEND], FACE_Z, STOREY, NULL, 0);
+    // Ground-floor window bars, which ref_06 and ref_07 both show on the flats at street level: a welded grid standing a little off the reveal. One mesh, sized to the wider window, since the narrower one is the same grid cut shorter and nobody at this distance counts its bars.
+    {
+        Builder *m = &gType[FR_BARS].b[MAT_METAL];
+        float x0 = -WIN_W26 * 0.5f + 0.030f, x1 = WIN_W26 * 0.5f - 0.030f;
+        float y0 = WIN_SILL + 0.030f, y1 = WIN_SILL + WIN_H - 0.030f;
+        float z = GLZ_Z1 + 0.030f;
+        for (int i = 0; i <= 7; i++) {
+            float x = Lerp(x0, x1, (float)i / 7.0f);
+            Box(m, x - 0.010f, x + 0.010f, y0, y1, z, z + 0.020f);
+        }
+        for (int i = 0; i <= 4; i++) {
+            float y = Lerp(y0, y1, (float)i / 4.0f);
+            Box(m, x0, x1, y - 0.010f, y + 0.010f, z + 0.020f, z + 0.040f);
+        }
+    }
+
+    // A split air conditioner, which ref_06 hangs beside a window and which nothing in the first build had: the one piece of the 21st century on a 1962 facade.
+    {
+        Group *g = &gType[FR_AC];
+        Builder *p = &g->b[MAT_PAINT];
+        Box(p, -0.400f, 0.400f, 0.0f, 0.560f, WALL_T + 0.030f, WALL_T + 0.290f);
+        Builder *m = &g->b[MAT_METAL];
+        Box(m, -0.360f, 0.360f, -0.070f, 0.0f, WALL_T + 0.060f, WALL_T + 0.260f);
+        Box(m, -0.360f, 0.360f, 0.560f, 0.630f, WALL_T + 0.060f, WALL_T + 0.260f);
+    }
 }
 
-// A floor slab, authored about the centre of its bay at the underside of the structural slab.
-// It spans from the inner face of the facade to the centre of the spine wall, which is the 5.76 m the series casts its slabs to.
+// How long a piece of slab or cross wall is. The full span from the facade to the spine is 5.71 m, and this lays it as two, so what ends up in the pile is a plate the length of a room rather than one the depth of the building.
+//
+// It costs no type and no geometry: a piece authored about its own centre is placed twice, and KNIT closes the two together so the intact building is unchanged. What it changes is the pile, where the first build stacked intact 5.7 m plates and 11.2 m cross walls, which is the one thing about that pile nobody could look at and believe.
+#define SPAN_PIECE    ((INNER_Z + SLAB_BEAR) * 0.5f)
+
+// A piece of floor slab, authored about its own centre at the underside of the structural slab.
 static void BuildSlab(Group *g, float w, MatId top)
 {
-    float z0 = -(INNER_Z + SLAB_BEAR), z1 = KNIT;
-    Box(&g->b[MAT_CONCRETE], -w * 0.5f - KNIT, w * 0.5f + KNIT, 0.0f, SLAB_STRUCT, z0, z1);
-    Box(&g->b[top], -w * 0.5f - KNIT, w * 0.5f + KNIT, SLAB_STRUCT, SLAB_T, z0, z1);
+    float hz = SPAN_PIECE * 0.5f + KNIT;
+    Box(&g->b[MAT_CONCRETE], -w * 0.5f - KNIT, w * 0.5f + KNIT, 0.0f, SLAB_STRUCT, -hz, hz);
+    Box(&g->b[top], -w * 0.5f - KNIT, w * 0.5f + KNIT, SLAB_STRUCT, SLAB_T, -hz, hz);
 }
+
+// Where the centre of piece `i` sits, measured out from the spine along -Z. Two pieces reach from the spine centre-line to SLAB_BEAR inside the facade panel, which is the 5.76 m the series casts its slabs to less the 0.05 the bearing eats; the far side of the building is the same two mirrored.
+static float SpanPieceZ(int i) { return -SPAN_PIECE * (0.5f + (float)i); }
 
 static void BuildStructureTypes(void)
 {
@@ -1083,10 +1446,9 @@ static void BuildStructureTypes(void)
     BuildSlab(&gType[FR_ROOF26], 2.6f, MAT_ROOF);
     BuildSlab(&gType[FR_ROOF32], 3.2f, MAT_ROOF);
 
-    // The cross wall: the load-bearing direction in this series, spanning the whole depth,
-    // authored about its own centre line at the floor it stands on.
+    // The cross wall: the load-bearing direction in this series, and the wall the charges are drilled into. Authored as one piece of the four it is laid in, about its own centre, for the same reason the slab is.
     Box(&gType[FR_XWALL].b[MAT_CONCRETE], -XWALL_T * 0.5f, XWALL_T * 0.5f,
-        -KNIT, STOREY - SLAB_T + KNIT, -INNER_Z - KNIT, INNER_Z + KNIT);
+        -KNIT, STOREY - SLAB_T + KNIT, -SPAN_PIECE * 0.5f - KNIT, SPAN_PIECE * 0.5f + KNIT);
 
     // The spine: one segment per bay, so it breaks with the bay rather than across it.
     Box(&gType[FR_SPINE26].b[MAT_CONCRETE], -1.3f - KNIT, 1.3f + KNIT, -KNIT, STOREY - SLAB_T + KNIT, -SPINE_T * 0.5f, SPINE_T * 0.5f);
@@ -1100,44 +1462,56 @@ static void BuildStructureTypes(void)
     Box(&gType[FR_PAREND].b[MAT_CONCRETE], -FACE_Z * 0.5f - KNIT, FACE_Z * 0.5f + KNIT, -KNIT, PARAPET_H, -PARAPET_T, 0.0f);
     Box(&gType[FR_PAREND].b[MAT_METAL], -FACE_Z * 0.5f - CORNICE_O, FACE_Z * 0.5f + CORNICE_O, PARAPET_H, PARAPET_H + 0.055f, -PARAPET_T - 0.030f, CORNICE_O);
 
-    // A balcony. Authored about the facade's outer face at floor level, so it hangs off the panel rather than off a copy of the panel's coordinates.
+    // A balcony, in the three pieces a balcony on one of these buildings is actually made of. Authored about the facade's outer face at floor level, so it hangs off the panel rather than off a copy of the panel's coordinates.
     //
-    // The front is a solid sheet, not a railing. The first build had 13 uprights and a top rail, and Codex read the whole facade as an access gallery: ref_03 and ref_05 both show boxy masses with opaque sheet fronts in whatever colour the resident had, and a great many enclosed behind glazing entirely. So there are two types, and four in ten of them are glazed in.
-    for (int glazed = 0; glazed < 2; glazed++) {
-        Group *g = &gType[glazed ? FR_BALCG : FR_BALC];
-        Builder *c = &g->b[MAT_CONCRETE];
-        float hw = BALC_W * 0.5f;
-        // The slab's root runs 0.20 back into the facade, which is where it is cast in.
-        Box(c, -hw, hw, -BALC_T, 0.0f, -0.200f, BALC_D);
-
+    // Three rather than one, because the colour is the whole point and a per-instance tint reaches every material its group owns. ref_03, ref_05, ref_06 and ref_07 between them show ochre, blue, sage, rust, white and grey-blue fronts on one building, and half of them enclosed in something the resident bought: the slab is the builder's and stays grey, the front and the enclosure are the flat's and take its colours. Splitting them also means the enclosure comes off before the slab does, which is what happens.
+    //
+    // The front is a solid sheet, not a railing. An earlier build had 13 uprights and a top rail, and Codex read the whole facade as an access gallery.
+    float hw = BALC_W * 0.5f;
+    float rt = BALC_RAIL_H;
+    {
+        // The slab, and the steel that carries the front. The slab's root runs 0.20 back into the facade, which is where it is cast in.
+        Group *g = &gType[FR_BALC];
+        Box(&g->b[MAT_CONCRETE], -hw, hw, -BALC_T, 0.0f, -0.200f, BALC_D);
+        Builder *r = &g->b[MAT_RUST];
+        for (int i = 0; i < 5; i++) {
+            float x = -hw + BALC_W * (float)i / 4.0f;
+            Box(r, x - 0.026f, x + 0.026f, 0.0f, rt, BALC_D - 0.045f, BALC_D - 0.005f);
+        }
+        Box(r, -hw, -hw + 0.052f, 0.0f, rt, 0.0f, BALC_D);
+        Box(r, hw - 0.052f, hw, 0.0f, rt, 0.0f, BALC_D);
+    }
+    {
+        // The painted sheet the resident fixed to that steel, and the capping rail over it.
+        Group *g = &gType[FR_BALCSHEET];
+        Builder *p = &g->b[MAT_PAINT];
+        Box(p, -hw, hw, 0.030f, rt - 0.045f, BALC_D - 0.075f, BALC_D - 0.040f);
+        Box(p, -hw + 0.010f, -hw + 0.045f, 0.030f, rt - 0.045f, 0.030f, BALC_D);
+        Box(p, hw - 0.045f, hw - 0.010f, 0.030f, rt - 0.045f, 0.030f, BALC_D);
         Builder *m = &g->b[MAT_METAL];
-        float rt = BALC_RAIL_H;
-        // Sheet front and returns, standing off the slab edge, with a capping rail over them.
-        Box(m, -hw, hw, 0.0f, rt - 0.045f, BALC_D - 0.055f, BALC_D);
-        Box(m, -hw, -hw + 0.055f, 0.0f, rt - 0.045f, 0.0f, BALC_D);
-        Box(m, hw - 0.055f, hw, 0.0f, rt - 0.045f, 0.0f, BALC_D);
-        Box(m, -hw - 0.020f, hw + 0.020f, rt - 0.045f, rt, BALC_D - 0.075f, BALC_D + 0.020f);
+        Box(m, -hw - 0.020f, hw + 0.020f, rt - 0.045f, rt, BALC_D - 0.095f, BALC_D + 0.020f);
         Box(m, -hw - 0.020f, -hw + 0.075f, rt - 0.045f, rt, 0.0f, BALC_D + 0.020f);
         Box(m, hw - 0.075f, hw + 0.020f, rt - 0.045f, rt, 0.0f, BALC_D + 0.020f);
-
-        if (glazed) {
-            // Glazed in up to the underside of the balcony above, in frames and panes, which is
-            // what perhaps half of these carry by now.
-            float top = STOREY - BALC_T - 0.030f;
-            Builder *f = &g->b[MAT_FRAME];
-            Box(f, -hw, hw, rt, top, BALC_D - 0.070f, BALC_D - 0.010f);
-            Box(f, -hw, -hw + 0.060f, rt, top, 0.0f, BALC_D);
-            Box(f, hw - 0.060f, hw, rt, top, 0.0f, BALC_D);
-            Box(f, -hw, hw, top - 0.055f, top, 0.0f, BALC_D);
-            for (int i = 1; i < 4; i++) {
-                float x = -hw + BALC_W * (float)i / 4.0f;
-                Box(f, x - 0.030f, x + 0.030f, rt, top, BALC_D - 0.070f, BALC_D - 0.010f);
-            }
-            Box(&g->b[MAT_GLASS], -hw + 0.055f, hw - 0.055f, rt + 0.030f, top - 0.055f,
-                BALC_D - 0.055f, BALC_D - 0.030f);
-            Box(&g->b[MAT_GLASS], -hw + 0.055f, -hw + 0.070f, rt + 0.030f, top - 0.055f, 0.030f, BALC_D - 0.060f);
-            Box(&g->b[MAT_GLASS], hw - 0.070f, hw - 0.055f, rt + 0.030f, top - 0.055f, 0.030f, BALC_D - 0.060f);
+    }
+    {
+        // The enclosure, glazed in up to the underside of the balcony above. Its frame carries the flat's colour, white on a plastic one and a brown or an ochre on the timber ones ref_05 and ref_07 are full of. The glass has to be a fourth group rather than a fourth material, for the same reason the window pane is its own group and for the same reason the car's glass is not part of its body: a per-instance tint reaches every material in the group it is applied to, so glass left in here would come out brown behind a brown frame.
+        Group *g = &gType[FR_BALCGLZ];
+        Group *q = &gType[FR_BALCPANE];
+        float top = STOREY - BALC_T - 0.030f;
+        Builder *f = &g->b[MAT_PAINT];
+        Box(f, -hw, hw, rt, rt + 0.060f, BALC_D - 0.070f, BALC_D - 0.010f);
+        Box(f, -hw, hw, top - 0.060f, top, BALC_D - 0.070f, BALC_D - 0.010f);
+        Box(f, -hw, -hw + 0.060f, rt, top, 0.0f, BALC_D);
+        Box(f, hw - 0.060f, hw, rt, top, 0.0f, BALC_D);
+        Box(f, -hw, hw, top - 0.055f, top, 0.0f, BALC_D);
+        for (int i = 1; i < 4; i++) {
+            float x = -hw + BALC_W * (float)i / 4.0f;
+            Box(f, x - 0.032f, x + 0.032f, rt, top, BALC_D - 0.070f, BALC_D - 0.010f);
         }
+        Box(&q->b[MAT_GLASS], -hw + 0.055f, hw - 0.055f, rt + 0.055f, top - 0.060f,
+            BALC_D - 0.055f, BALC_D - 0.030f);
+        Box(&q->b[MAT_GLASS], -hw + 0.055f, -hw + 0.070f, rt + 0.055f, top - 0.060f, 0.030f, BALC_D - 0.060f);
+        Box(&q->b[MAT_GLASS], hw - 0.070f, hw - 0.055f, rt + 0.055f, top - 0.060f, 0.030f, BALC_D - 0.060f);
     }
 
     // The entrance canopy: a slab on two brackets over the door.
@@ -1164,7 +1538,8 @@ static void BuildStructureTypes(void)
     // which the first build had none of. One segment per storey, so they break up with the
     // building rather than falling as a 13 m stick.
     {
-        Builder *m = &gType[FR_PIPE].b[MAT_METAL];
+        // Rusted through rather than painted, which is what ref_03 and ref_05 both show and the loudest colour on either facade.
+        Builder *m = &gType[FR_PIPE].b[MAT_RUST];
         Tube(m, (Vector3){ 0, -KNIT, 0 }, (Vector3){ 0, STOREY + KNIT, 0 }, 0.058f, 0.058f, 8, false, false);
         Box(m, -0.080f, 0.080f, 0.180f, 0.260f, -0.100f, 0.010f);
     }
@@ -1483,6 +1858,8 @@ static void BuildYardTypes(void)
     // Rubble: a broken slab chunk, flattened rather than round, instanced at half to twice its
     // built size. It is the material a panel becomes that no panel accounts for.
     Blob(&gType[FR_RUBBLE].b[MAT_CONCRETE], Vector3Zero(), 0.78f, 0.21f, 0.56f, 0.52f, 631u, 7);
+    // And the fines: what a panel sheds along its break rather than what it breaks into. Rounder, much smaller, and thrown far further for its size, which is why the two are separate types rather than one at two scales.
+    Blob(&gType[FR_RUBBLE2].b[MAT_CONCRETE], Vector3Zero(), 0.30f, 0.19f, 0.25f, 0.62f, 733u, 6);
 
     BuildTree(&gType[FR_BIRCH], MAT_BIRCH, 16.5f, 0.200f, 2.55f, 1.45f, 22, 5u);
     BuildTree(&gType[FR_MAPLE], MAT_BARK, 11.5f, 0.290f, 3.60f, 0.86f, 24, 23u);
@@ -1546,7 +1923,7 @@ static void PlaceYard(void)
 // footprint, so a chunk appears where its parent was and the dust covers its arrival.
 static void PlaceRubble(void)
 {
-    const int N = 170;
+    const int N = 240;
     for (int i = 0; i < N; i++) {
         float x = (Hash2(i, 41, 4096, 191u) - 0.5f) * BLOCK_LEN * 0.98f;
         float z = (Hash2(i, 42, 4096, 193u) - 0.5f) * 2.0f * FACE_Z * 0.92f;
@@ -1554,28 +1931,177 @@ static void PlaceRubble(void)
         EmitAt(FR_RUBBLE, x, y, z, 360.0f * Hash2(i, 44, 4096, 199u),
                0.50f + 1.35f * Hash2(i, 45, 4096, 211u), WHITE);
     }
+    // The fines come off the cut rather than out of the whole volume, because that is where the concrete is actually being broken, and they go outwards and low.
+    const int M = 300;
+    for (int i = 0; i < M; i++) {
+        float x = (Hash2(i, 46, 4096, 223u) - 0.5f) * BLOCK_LEN;
+        float z = (Hash2(i, 47, 4096, 227u) - 0.5f) * 2.0f * FACE_Z;
+        float y = PLINTH_Y + (CUT_TOP - PLINTH_Y) * Hash2(i, 48, 4096, 229u) * 1.6f;
+        EmitAt(FR_RUBBLE2, x, y, z, 360.0f * Hash2(i, 49, 4096, 233u),
+               0.45f + 1.10f * Hash2(i, 50, 4096, 239u), WHITE);
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Placing the fragments
 // ---------------------------------------------------------------------------
 
-// Which panel type a bay carries on a given facade and floor.
+// ---------------------------------------------------------------------------
+// The flat
+//
+// The unit of variety on a khrushchyovka facade is not the panel and not the building: it is the flat, because everything that varies was decided by whoever lived in one. Windows were replaced a flat at a time, balconies were enclosed a flat at a time in whatever the resident could get, and the curtain in every window of one flat came out of the same shop on the same afternoon. A facade scattered panel by panel reads as noise; the same amount of variation grouped by flat reads as sixty households, which is what ref_03, ref_05, ref_06 and ref_07 all show and what the first build -- one window, one balcony, one grey, 210 times -- showed none of.
+//
+// A 1-464 section has four flats to a landing. Here that is the three bays either side of the stairwell, on each of the two facades, which puts one of the two 3.2 m balcony bays in every flat and gives 3 x 5 x 4 = 60 of them.
+// ---------------------------------------------------------------------------
+
+typedef enum { BAL_OPEN, BAL_TIMBER, BAL_PVC } BalconyKind;
+
+typedef struct {
+    bool pvc;            // the windows have been replaced with plastic
+    Color frame;         // and if not, what the timber was last painted
+    Color curtain;       // what shows behind the glass
+    BalconyKind balcony;
+    Color sheet;         // the painted front, which is the loudest colour on the facade
+    Color enclosure;     // the frames of the glazing over it, where there is any
+    bool ac;
+    bool bars;           // only ever asked of the ground floor
+} Flat;
+
+// Colours are authored well below where they should read, because lighting.fs gamma-corrects with pow(c, 1/2.2): a component of 128 leaves the shader at 0.60 before any light reaches it, so an ochre picked at the value it should appear comes out as cream.
+static const Color TIMBER_PAINT[] = {
+    { 214, 210, 200, 255 },   // the white nearly all of them started as
+    { 214, 210, 200, 255 },
+    { 118, 148, 162, 255 },   // the pale blue-green ref_03 has a column of
+    { 132, 148, 122, 255 },
+    { 104, 76, 52, 255 },     // and the ones nobody has painted since
+};
+
+static const Color CURTAIN[] = {
+    { 150, 142, 124, 255 },   // net, which is most of them
+    { 150, 142, 124, 255 },
+    { 96, 100, 104, 255 },
+    { 46, 46, 50, 255 },      // a dark room, which is what an unlit one is
+    { 46, 46, 50, 255 },
+    { 132, 108, 78, 255 },
+    { 104, 84, 88, 255 },
+    { 108, 124, 132, 255 },
+};
+
+// ref_05 and ref_07 between them carry every one of these on a single building. Muted rather than picked at full strength: these are forty years of weather on a coat of oil paint, and the gamma correction lifts them again on the way out.
+static const Color BALCONY_SHEET[] = {
+    { 148, 120, 62, 255 },    // the ochre that is on more of them than anything else
+    { 148, 120, 62, 255 },
+    { 96, 116, 134, 255 },
+    { 106, 118, 92, 255 },
+    { 118, 76, 52, 255 },
+    { 164, 160, 150, 255 },
+    { 100, 110, 118, 255 },
+};
+
+static const Color ENCLOSURE_FRAME[] = {
+    { 194, 192, 186, 255 },   // white plastic
+    { 126, 94, 56, 255 },     // and the varnished timber ref_05 is full of
+    { 148, 120, 62, 255 },
+};
+
+#define COUNT_OF(a) ((int)(sizeof(a) / sizeof((a)[0])))
+
+// Which flat a bay belongs to: 0 for the three bays left of the stairwell, 1 for the three right of it. The stairwell itself belongs to nobody, which is the whole reason it is the one part of the facade with no variation on it.
+static int FlatHalf(int bay) { return (bay < BAY_STAIR) ? 0 : 1; }
+
+static Flat FlatAt(int s, int floor, int side, int half)
+{
+    int id = ((s * FLOORS + floor) * 2 + side) * 2 + half;
+    Flat fl = { 0 };
+    fl.pvc = Hash2(id, 1, 4096, 617u) < 0.55f;
+    fl.frame = fl.pvc ? (Color){ 226, 224, 220, 255 }
+                      : TIMBER_PAINT[(int)(Hash2(id, 2, 4096, 619u) * COUNT_OF(TIMBER_PAINT)) % COUNT_OF(TIMBER_PAINT)];
+    fl.curtain = CURTAIN[(int)(Hash2(id, 3, 4096, 631u) * COUNT_OF(CURTAIN)) % COUNT_OF(CURTAIN)];
+
+    float b = Hash2(id, 4, 4096, 641u);
+    fl.balcony = (b < 0.42f) ? BAL_OPEN : (b < 0.72f) ? BAL_TIMBER : BAL_PVC;
+    fl.sheet = BALCONY_SHEET[(int)(Hash2(id, 5, 4096, 643u) * COUNT_OF(BALCONY_SHEET)) % COUNT_OF(BALCONY_SHEET)];
+    fl.enclosure = (fl.balcony == BAL_PVC)
+        ? ENCLOSURE_FRAME[0]
+        : ENCLOSURE_FRAME[1 + ((int)(Hash2(id, 6, 4096, 647u) * 2.0f) & 1)];
+
+    fl.ac = Hash2(id, 7, 4096, 653u) < 0.16f;
+    fl.bars = Hash2(id, 8, 4096, 659u) < 0.45f;
+    return fl;
+}
+
+// ---------------------------------------------------------------------------
+// Placing the fragments
+// ---------------------------------------------------------------------------
+
+// Which panel kind a bay carries on a given facade and floor.
 // front is +Z. The stairwell touches the front, so that is where its windows go and where the entrance cannot be; the entrance is on the back, which is the courtyard side.
-static FragType PanelAt(int bay, int floor, bool front, FragType *glazing)
+static PanelKind PanelAt(int bay, int floor, bool front)
 {
     if (bay == BAY_STAIR) {
-        if (!front && floor == 0) { *glazing = FR_GDOOR; return FR_PDOOR; }
-        // A landing sits half a flight above the floor its panel stands on, so the lights zigzag
-        // rather than stacking on the apartments' rhythm.
-        if (floor & 1) { *glazing = FR_GSTAIR2; return FR_PSTAIR2; }
-        *glazing = FR_GSTAIR;
-        return FR_PSTAIR;
+        if (!front && floor == 0) return PK_DOOR;
+        // A landing sits half a flight above the floor its panel stands on, so the lights zigzag rather than stacking on the apartments' rhythm.
+        return (floor & 1) ? PK_STAIR2 : PK_STAIR;
     }
-    if (bay == BAY_BALC_A || bay == BAY_BALC_B) { *glazing = FR_G32B; return FR_P32B; }
-    if (BAY_W[bay] > 2.9f) { *glazing = FR_G32; return FR_P32; }
-    *glazing = FR_G26;
-    return FR_P26;
+    // The 3.2 m bays carry balconies, but not on the ground floor, where they carry a plain wide window instead.
+    // An earlier build ran them to the ground on the strength of ref_07, and CheckTypesBuilt then reported the plain 3.2 m panel built and never placed anywhere in the block, which is what sent this back to the photographs: ref_03 and ref_05 both show the balcony stacks starting one storey up over a ground floor of plain wide windows, and ref_07's are the reading that was wrong.
+    if ((bay == BAY_BALC_A || bay == BAY_BALC_B) && floor > 0) return PK_32B;
+    return (BAY_W[bay] > 2.9f) ? PK_32 : PK_26;
+}
+
+// The joinery and the pane a kind carries, given whether the flat behind it has replaced its windows. The stairwell is communal, so nobody has.
+static void GlazingFor(PanelKind k, bool pvc, FragType *joinery, FragType *pane)
+{
+    switch (k) {
+        case PK_26:     *joinery = pvc ? FR_J26P : FR_J26T;   *pane = FR_Q26; return;
+        case PK_32:     *joinery = pvc ? FR_J32P : FR_J32T;   *pane = FR_Q32; return;
+        case PK_32B:    *joinery = pvc ? FR_J32BP : FR_J32BT; *pane = FR_Q32B; return;
+        case PK_STAIR:  *joinery = FR_JSTAIR;  *pane = FR_QSTAIR; return;
+        case PK_STAIR2: *joinery = FR_JSTAIR2; *pane = FR_QSTAIR2; return;
+        case PK_DOOR:   *joinery = FR_JDOOR;   *pane = FR_QDOOR; return;
+        default:        *joinery = FR_COUNT;   *pane = FR_COUNT; return;
+    }
+}
+
+// Whether the panel at a given place comes down in one piece or two, and which two. Hashed off the placement so it is stable, and set at three in five, because a demolition leaves some panels whole and a facade every one of which cracks identically reads as a pattern rather than as damage.
+static bool PanelFractures(PanelKind k, int s, int f, int bay, int side)
+{
+    const PanelTypes *pt = &PANEL_TYPE[k];
+    if (pt->left == pt->whole) return false;
+    return Hash2(((s * FLOORS + f) * BAYS + bay) * 2 + side, 9, 4096, 661u) < 0.60f;
+}
+
+// One panel of the facade, with everything that hangs on it: the panel itself (whole, or the two pieces it will break into), the joinery and its pane, and whatever the flat behind it has fixed to the wall.
+static void PlacePanel(PanelKind k, int s, int f, int bay, int side, float x, float y, float z, float yaw)
+{
+    const PanelTypes *pt = &PANEL_TYPE[k];
+    bool split = PanelFractures(k, s, f, bay, side);
+    Emit(split ? pt->left : pt->whole, x, y, z, yaw);
+    if (split) Emit(pt->right, x, y, z, yaw);
+
+    if (k == PK_END) return;
+
+    Flat fl = FlatAt(s, f, side, FlatHalf(bay));
+    bool communal = (bay == BAY_STAIR);
+    FragType joinery, pane;
+    GlazingFor(k, !communal && fl.pvc, &joinery, &pane);
+
+    EmitAt(joinery, x, y, z, yaw, 1.0f, communal ? TIMBER_PAINT[0] : fl.frame);
+    // The pane's tint is what is behind the glass, not the glass: a dark room, a net curtain, a kitchen with the light on. It is the cheapest thing on this facade and the one that most makes it read as lived in.
+    EmitAt(pane, x, y, z, yaw, 1.0f, communal ? CURTAIN[3] : fl.curtain);
+
+    if (communal) return;
+
+    // Bars, on the ground floor only, which is the only floor anyone can reach, and on the plain bays only, because that is the one window the single grid mesh is centred on and sized to.
+    if (f == 0 && fl.bars && k == PK_26) Emit(FR_BARS, x, y, z, yaw);
+
+    // An air conditioner, beside the window rather than over it, on the plain bays for the same reason.
+    // Placed in the panel's own frame and rotated out of it, not by testing which yaw this facade happens to have: MatrixRotateY sends local +X to world (cos yaw, 0, -sin yaw), so the offset has to go through the same rotation the panel does.
+    if (fl.ac && k == PK_26 && f > 0) {
+        float ox = ((bay < BAY_STAIR) ? -1.0f : 1.0f) * (WIN_W26 * 0.5f + 0.520f);
+        float c = cosf(yaw * DEG2RAD), sn = sinf(yaw * DEG2RAD);
+        EmitAt(FR_AC, x + ox * c, y + WIN_SILL + 0.520f, z - ox * sn, yaw, 1.0f, WHITE);
+    }
 }
 
 static void PlaceBuilding(void)
@@ -1586,43 +2112,53 @@ static void PlaceBuilding(void)
 
             for (int b = 0; b < BAYS; b++) {
                 float x = BayX(s, b);
-                FragType glz;
 
-                FragType p = PanelAt(b, f, true, &glz);
-                Emit(p, x, y, INNER_Z, 0.0f);
-                Emit(glz, x, y, INNER_Z, 0.0f);
+                for (int side = 0; side < 2; side++) {
+                    float pz = (side == 0) ? INNER_Z : -INNER_Z;
+                    PlacePanel(PanelAt(b, f, side == 0), s, f, b, side, x, y, pz, (side == 0) ? 0.0f : 180.0f);
+                }
 
-                p = PanelAt(b, f, false, &glz);
-                Emit(p, x, y, -INNER_Z, 180.0f);
-                Emit(glz, x, y, -INNER_Z, 180.0f);
-
-                // Floor slabs, one each side of the spine.
+                // Floor slabs: two pieces each side of the spine, so what lands in the pile is a plate the length of a room.
                 FragType slab = (BAY_W[b] > 2.9f) ? FR_SLAB32 : FR_SLAB26;
-                Emit(slab, x, y - SLAB_T, 0.0f, 0.0f);
-                Emit(slab, x, y - SLAB_T, 0.0f, 180.0f);
+                for (int side = 0; side < 2; side++) {
+                    for (int i = 0; i < 2; i++) {
+                        Emit(slab, x, y - SLAB_T, (side == 0) ? SpanPieceZ(i) : -SpanPieceZ(i), 0.0f);
+                    }
+                }
 
                 Emit((BAY_W[b] > 2.9f) ? FR_SPINE32 : FR_SPINE26, x, y, 0.0f, 0.0f);
 
-                // Balconies, on the two wide bays of every section and every floor, both facades. ref_07 shows them running to the ground floor rather than starting at the first, which is what this follows.
-                if (b == BAY_BALC_A || b == BAY_BALC_B) {
+                // Balconies, on the two wide bays of every section, on the four floors above the ground one, both facades. Which floors is settled in PanelAt, and this asks the same question the same way rather than repeating the answer.
+                // The slab is the builder's and is the same grey everywhere; the front and whatever is glazed over it belong to the flat behind them.
+                if (PanelAt(b, f, true) == PK_32B) {
                     for (int side = 0; side < 2; side++) {
                         float bz = (side == 0) ? FACE_Z : -FACE_Z;
-                        bool glazed = Hash2(s * 13 + b, f * 7 + side, 512, 313u) < 0.40f;
-                        Emit(glazed ? FR_BALCG : FR_BALC, x, y, bz, (side == 0) ? 0.0f : 180.0f);
+                        float yaw = (side == 0) ? 0.0f : 180.0f;
+                        Flat fl = FlatAt(s, f, side, FlatHalf(b));
+                        Emit(FR_BALC, x, y, bz, yaw);
+                        EmitAt(FR_BALCSHEET, x, y, bz, yaw, 1.0f, fl.sheet);
+                        if (fl.balcony != BAL_OPEN) {
+                            EmitAt(FR_BALCGLZ, x, y, bz, yaw, 1.0f, fl.enclosure);
+                            Emit(FR_BALCPANE, x, y, bz, yaw);
+                        }
                     }
                 }
             }
 
-            // Cross walls on every bay boundary of the section, plus the one that closes it.
+            // Cross walls on every bay boundary of the section, plus the one that closes it, in four pieces across the depth for the same reason the slabs are in two.
             for (int b = 0; b <= BAYS; b++) {
                 float x = SectionX(s) - SECTION_LEN * 0.5f;
                 for (int i = 0; i < b; i++) x += BAY_W[i];
                 // The boundary between two sections is one wall, not two.
                 if (b == BAYS && s != SECTIONS - 1) continue;
-                Emit(FR_XWALL, x, y, 0.0f, 0.0f);
+                for (int side = 0; side < 2; side++) {
+                    for (int i = 0; i < 2; i++) {
+                        Emit(FR_XWALL, x, y, (side == 0) ? SpanPieceZ(i) : -SpanPieceZ(i), 0.0f);
+                    }
+                }
             }
 
-            // End walls, two panels deep, on the two ends of the block only.
+            // End walls, four panels across the depth, on the two ends of the block only.
             for (int e = 0; e < 2; e++) {
                 if (!((s == 0 && e == 0) || (s == SECTIONS - 1 && e == 1))) continue;
                 float sx = (e == 0) ? -BLOCK_LEN * 0.5f : BLOCK_LEN * 0.5f;
@@ -1630,8 +2166,9 @@ static void PlaceBuilding(void)
                 // The left-hand gable has to face -X, so it takes -90 and the right-hand one +90, and each origin sits on its own inner face the way every other facade panel's does.
                 float yaw = (e == 0) ? -90.0f : 90.0f;
                 float ex = sx + ((e == 0) ? WALL_T : -WALL_T);
-                Emit(FR_PEND, ex, y, FACE_Z * 0.5f, yaw);
-                Emit(FR_PEND, ex, y, -FACE_Z * 0.5f, yaw);
+                for (int q = 0; q < 4; q++) {
+                    PlacePanel(PK_END, s, f, BAYS + e, q, ex, y, END_W * (-1.5f + (float)q), yaw);
+                }
             }
 
             // Downpipes, at each section joint and each gable corner, on both facades. A pipe
@@ -1654,8 +2191,11 @@ static void PlaceBuilding(void)
         for (int b = 0; b < BAYS; b++) {
             float x = BayX(s, b);
             FragType roof = (BAY_W[b] > 2.9f) ? FR_ROOF32 : FR_ROOF26;
-            Emit(roof, x, ROOF_Y - SLAB_T, 0.0f, 0.0f);
-            Emit(roof, x, ROOF_Y - SLAB_T, 0.0f, 180.0f);
+            for (int side = 0; side < 2; side++) {
+                for (int i = 0; i < 2; i++) {
+                    Emit(roof, x, ROOF_Y - SLAB_T, (side == 0) ? SpanPieceZ(i) : -SpanPieceZ(i), 0.0f);
+                }
+            }
             Emit((BAY_W[b] > 2.9f) ? FR_PAR32 : FR_PAR26, x, ROOF_Y, FACE_Z, 0.0f);
             Emit((BAY_W[b] > 2.9f) ? FR_PAR32 : FR_PAR26, x, ROOF_Y, -FACE_Z, 180.0f);
         }
@@ -1844,12 +2384,19 @@ static void BuildGround(void)
 #define FRONT_V      11.0f    // speed the crushing front climbs the building, m/s
 #define GRAV         9.81f
 #define CRUSH_LOSS   0.62f    // how much of a storey's height is gone once it has been crushed
-#define CUT_TOP      (PLINTH_Y + 2.0f * STOREY)   // charges are in the two storeys below this
 #define BULK_FACTOR  1.55f    // how much a cubic metre of concrete swells once it is rubble
 #define PILE_SPREAD  9.0f     // how far past the footprint the debris skirt is expected to run
 #define BLAST_V      105.0f   // speed of the air blast that reaches the yard, m/s
 
-static bool IsBuilding(FragType t) { return t < FR_RUBBLE; }
+// Everything the demolition takes down, as against the yard, which it only shakes.
+static bool IsBuilding(FragType t)
+{
+    FragClass c = FR_CLASS[t];
+    return c != FC_YARD && c != FC_RUBBLE;
+}
+
+// Everything that ends up in the pile, which is the building plus the material it becomes.
+static bool IsDebris(FragType t) { return FR_CLASS[t] != FC_YARD; }
 
 // The pile is a heightfield, not a formula. Fragments are planned in the order they land and each
 // is put on top of whatever is already in the cells its own footprint covers, so the pile is
@@ -1992,9 +2539,9 @@ static void PlanFragment(int i)
     float sz = (wc.z >= 0.0f) ? 1.0f : -1.0f;
     float out = 0.0f, up = 0.0f, along = 0.6f * Rand11(i, 2);
 
-    bool skin = (f->type <= FR_PEND) || (f->type >= FR_G26 && f->type <= FR_GDOOR) || f->type == FR_PIPE;
-    bool glazed = (f->type >= FR_G26 && f->type <= FR_GDOOR);
-    bool balcony = (f->type == FR_BALC || f->type == FR_BALCG);
+    FragClass cls = FR_CLASS[f->type];
+    bool glazed = (cls == FC_GLASS);
+    bool balcony = (cls == FC_BALCONY);
 
     if (wc.y < CUT_TOP) {
         // The charges are in here. This is the only material that is thrown rather than dropped.
@@ -2010,7 +2557,7 @@ static void PlanFragment(int i)
         // A cantilever with nothing above it, so it goes before the wall it hangs on.
         m->t0 -= 0.22f;
         out = 1.1f + 0.10f * height + 0.8f * Rand01(i, 9);
-    } else if (skin) {
+    } else if (cls == FC_SKIN || cls == FC_FITTING) {
         // A review round read the first pass as the facade being explosively blown off while the
         // roof stayed level over it. What actually happens is that the lower storeys lose support
         // and the mass above starts down before anything peels, so the skin now waits a fifth of
@@ -2018,7 +2565,7 @@ static void PlanFragment(int i)
         // outward speed it had. The peel then comes from the tumble and the fall rather than a kick.
         m->t0 += 0.20f;
         out = 0.25f + 0.038f * height + 0.45f * Rand01(i, 10);
-    } else if (f->type == FR_RUBBLE) {
+    } else if (cls == FC_RUBBLE) {
         m->t0 = T_BLAST + seq + climb * 0.75f + 0.35f * Rand01(i, 18);
         out = 1.3f + 3.4f * Rand01(i, 19);
         up = 0.4f + 2.6f * Rand01(i, 20);
@@ -2032,7 +2579,7 @@ static void PlanFragment(int i)
     m->v0 = (Vector3){ along, up, sz * out };
     m->axis = Vector3Normalize((Vector3){ Rand11(i, 13) + 0.05f, Rand11(i, 14) * 0.4f, Rand11(i, 15) });
     m->omega = (glazed ? 3.4f : balcony ? 1.9f : 0.7f) * (0.5f + Rand01(i, 16)) * (Rand01(i, 17) < 0.5f ? -1.0f : 1.0f);
-    if (f->type == FR_RUBBLE) m->omega *= 4.0f;
+    if (cls == FC_RUBBLE) m->omega *= 4.0f;
 
     m->t0 = fmaxf(m->t0, T_BLAST + seq);
     m->seq = seq;
@@ -2059,7 +2606,7 @@ static void PlanFragment(int i)
 // simply hangs. It grows the whole time, and fades to nothing inside its own life.
 // ---------------------------------------------------------------------------
 
-#define DUST_MAX     1240
+#define DUST_MAX     2600
 #define DUST_TAU     0.62f    // time constant of the speed decay
 
 typedef struct {
@@ -2101,7 +2648,7 @@ static void AddPuff(Vector3 p, Vector3 v, float t0, float life, float r0, float 
 
 static void PlaceDust(void)
 {
-    const int SURGE = 620, COLUMN = 260;
+    const int SURGE = 400, COLUMN = 190;
 
     for (int i = 0; i < SURGE; i++) {
         // Born on the footprint's perimeter, as the firing sequence reaches that x.
@@ -2118,8 +2665,8 @@ static void PlaceDust(void)
         Vector3 v = { (Hash2(i, 7, 4096, 101u) - 0.5f) * 7.0f, 0.8f + 2.2f * Hash2(i, 8, 4096, 103u), sz * speed };
         float r0 = 2.0f + 2.4f * Hash2(i, 9, 4096, 107u);
         AddPuff((Vector3){ x, y, z }, v, t0, 2.2f + 1.7f * Hash2(i, 10, 4096, 109u),
-                r0, r0 * (2.9f + 1.6f * Hash2(i, 11, 4096, 113u)),
-                0.15f + 0.10f * Hash2(i, 12, 4096, 127u), 0.25f + 0.55f * Hash2(i, 13, 4096, 131u), i);
+                r0, r0 * (2.1f + 1.1f * Hash2(i, 11, 4096, 113u)),
+                0.095f + 0.065f * Hash2(i, 12, 4096, 127u), 0.25f + 0.55f * Hash2(i, 13, 4096, 131u), i);
     }
 
     for (int i = 0; i < COLUMN; i++) {
@@ -2140,7 +2687,7 @@ static void PlaceDust(void)
         // fainter for it, and each puff now gets its own buoyancy so their tops do not line up.
         AddPuff((Vector3){ x, y, z }, v, t0, 2.2f + 1.5f * Hash2(i, 29, 4096, 173u),
                 r0, r0 * (2.0f + 1.2f * Hash2(i, 30, 4096, 179u)),
-                0.085f + 0.070f * Hash2(i, 31, 4096, 181u), 0.7f + 1.7f * Hash2(i, 32, 4096, 191u), i + SURGE);
+                0.060f + 0.055f * Hash2(i, 31, 4096, 181u), 0.7f + 1.7f * Hash2(i, 32, 4096, 191u), i + SURGE);
     }
 
     for (int i = 0; i < 190; i++) {
@@ -2283,7 +2830,7 @@ static void SolveLanding(void)
 {
     int n = 0;
     for (int i = 0; i < gFragCount; i++) {
-        if (IsBuilding(gFrag[i].type) || gFrag[i].type == FR_RUBBLE) gLandOrder[n++] = i;
+        if (IsDebris(gFrag[i].type)) gLandOrder[n++] = i;
     }
     for (int a = 1; a < n; a++) {
         int v = gLandOrder[a], b = a - 1;
@@ -2314,6 +2861,50 @@ static void SolveLanding(void)
         float sc = gFrag[i].scale;
         PileDeposit(wc.x, wc.z, e.x, e.z, gType[gFrag[i].type].volume * sc * sc * sc);
     }
+}
+
+// The fourth population, and the one the first build had no answer for: the dust a piece raises where it actually hits.
+//
+// The other three are placed before anything is thrown, off the footprint and the firing sequence, and so they are a plausible cloud rather than this collapse's cloud. They bloom whether or not anything has landed yet, they bloom evenly along a block whose two ends land three tenths of a second apart, and they are silent about the debris skirt, which is where the largest pieces end up and where a demolition throws its most conspicuous dust.
+//
+// This one is placed after SolveLanding, so a puff exists because a slab hit the pile there at that moment. That makes the cloud a consequence of the collapse rather than a decoration over it, and it is the only population that reaches out over the skirt, because it goes where the debris went.
+//
+// One puff per landing would be 1900, so it takes a hashed share of them and scales what it takes by how big the piece was. Everything smaller than a wheelbarrow raises nothing worth drawing.
+static void AddImpactDust(void)
+{
+    int taken = 0;
+    for (int i = 0; i < gFragCount; i++) {
+        if (!IsDebris(gFrag[i].type)) continue;
+
+        const Motion *m = &gMotion[i];
+        // A piece that never left the ground is the bottom of the building becoming the bottom of the pile. It did not fall, so it raises nothing.
+        if (m->t1 - m->t0 < 0.12f) continue;
+
+        float sc = gFrag[i].scale;
+        float vol = gType[gFrag[i].type].volume * sc * sc * sc;
+        if (vol < 0.25f) continue;
+        if (Hash2(i, 71, 4096, 743u) > 0.26f) continue;
+
+        Vector3 c = Vector3Transform(m->c, FlightPose(i, m->t1));
+        // How hard it arrived, which is what sets how much it throws up. Ballistic, so this is just the fall.
+        float fall = fmaxf(0.0f, m->rest.y - c.y);
+        float speed = sqrtf(fmaxf(0.0f, m->v0.y * m->v0.y + 2.0f * GRAV * fall));
+
+        float r0 = 0.55f + 0.85f * cbrtf(vol) + 0.020f * speed;
+        Vector3 v = {
+            (Hash2(i, 72, 4096, 751u) - 0.5f) * 5.0f,
+            0.9f + 0.10f * speed,
+            (Hash2(i, 73, 4096, 757u) - 0.5f) * 5.0f,
+        };
+        // Later arrivals land on a pile that is already there and already smoking, so they are given a little less: by then the surge and the column are both up and a fourth full-strength cloud on top of them is what turns the courtyard into fog.
+        float peak = 0.075f + 0.055f * Hash2(i, 74, 4096, 761u);
+        AddPuff((Vector3){ c.x, fmaxf(0.20f, c.y - 0.4f), c.z }, v,
+                m->t1, 1.5f + 1.4f * Hash2(i, 75, 4096, 769u),
+                r0, r0 * (2.4f + 1.3f * Hash2(i, 76, 4096, 773u)),
+                peak, 0.30f + 0.60f * Hash2(i, 77, 4096, 787u), i + 4000);
+        taken++;
+    }
+    TraceLog(LOG_INFO, "panelka: %d landings raise their own dust, of %d puffs in all", taken, gPuffCount);
 }
 
 // When the air blast reaches a point in the yard. It leaves the building at the moment the
@@ -2423,23 +3014,27 @@ static void Update(float t)
 // Parts
 // ---------------------------------------------------------------------------
 
-#define COUNT_OF(a) ((int)(sizeof(a) / sizeof((a)[0])))
-
-static Group *PART_SHELL[]  = { &gType[FR_P26], &gType[FR_P32], &gType[FR_P32B],
-                                &gType[FR_PSTAIR], &gType[FR_PDOOR], &gType[FR_PEND], &gType[FR_PIPE] };
-static Group *PART_GLAZ[]   = { &gType[FR_G26], &gType[FR_G32], &gType[FR_G32B],
-                                &gType[FR_GSTAIR], &gType[FR_GDOOR] };
+static Group *PART_SHELL[]  = { &gType[FR_P26], &gType[FR_P26L], &gType[FR_P26R],
+                                &gType[FR_P32], &gType[FR_P32L], &gType[FR_P32R],
+                                &gType[FR_P32B], &gType[FR_P32BL], &gType[FR_P32BR],
+                                &gType[FR_PEND], &gType[FR_PENDL], &gType[FR_PENDR],
+                                &gType[FR_PSTAIR], &gType[FR_PSTAIR2], &gType[FR_PDOOR], &gType[FR_PIPE] };
+static Group *PART_GLAZ[]   = { &gType[FR_J26P], &gType[FR_J26T], &gType[FR_J32P], &gType[FR_J32T],
+                                &gType[FR_J32BP], &gType[FR_J32BT], &gType[FR_JSTAIR], &gType[FR_JSTAIR2],
+                                &gType[FR_JDOOR], &gType[FR_Q26], &gType[FR_Q32], &gType[FR_Q32B],
+                                &gType[FR_QSTAIR], &gType[FR_QSTAIR2], &gType[FR_QDOOR],
+                                &gType[FR_BARS], &gType[FR_AC] };
 static Group *PART_STRUCT[] = { &gType[FR_SLAB26], &gType[FR_SLAB32],
                                 &gType[FR_XWALL], &gType[FR_SPINE26], &gType[FR_SPINE32] };
 static Group *PART_ROOF[]   = { &gType[FR_ROOF26], &gType[FR_ROOF32], &gType[FR_PAR26],
                                 &gType[FR_PAR32], &gType[FR_PAREND], &gType[FR_VENT], &gType[FR_MAST] };
-static Group *PART_BALC[]   = { &gType[FR_BALC], &gType[FR_BALCG] };
-static Group *PART_ENTRY[]  = { &gType[FR_PDOOR], &gType[FR_GDOOR], &gType[FR_CANOPY] };
+static Group *PART_BALC[]   = { &gType[FR_BALC], &gType[FR_BALCSHEET], &gType[FR_BALCGLZ], &gType[FR_BALCPANE] };
+static Group *PART_ENTRY[]  = { &gType[FR_PDOOR], &gType[FR_JDOOR], &gType[FR_QDOOR], &gType[FR_CANOPY] };
 static Group *PART_PLINTH[] = { &gPlinth };
 static Group *PART_TREES[]  = { &gType[FR_BIRCH], &gType[FR_MAPLE] };
 static Group *PART_CARS[]   = { &gType[FR_CARBODY], &gType[FR_CARTRIM] };
 static Group *PART_YARD[]   = { &gType[FR_BENCH], &gType[FR_RUGFRAME], &gType[FR_LAMP], &gType[FR_BIN] };
-static Group *PART_DEBRIS[] = { &gType[FR_RUBBLE] };
+static Group *PART_DEBRIS[] = { &gType[FR_RUBBLE], &gType[FR_RUBBLE2] };
 static Group *PART_DUST[]   = { &gDust, &gFlash };
 static Group *PART_GROUND[] = { &gGround };
 
@@ -2543,7 +3138,7 @@ static void CheckBaysTile(void)
              SECTIONS, SECTION_LEN, BLOCK_LEN, 2.0f * FACE_Z, ROOF_Y + PARAPET_H);
 }
 
-// Every opening must sit inside the panel it is cut into, clear of the joint groove, and the openings of one panel must be listed left to right, which is what WallLayer's single sweep across a band assumes.
+// Every opening must sit inside the panel it is cut into, clear of the border round it, and the openings of one panel must be listed left to right, which is what WallLayer's single sweep across a band assumes.
 static void CheckOpenings(const char *name, float w, float h, const Rect *op, int nop)
 {
     float worst = 1e9f;
@@ -2557,27 +3152,88 @@ static void CheckOpenings(const char *name, float w, float h, const Rect *op, in
         }
     }
     if (nop > 0 && worst < 0.060f) {
-        TraceLog(LOG_WARNING, "panelka: %s leaves only %.3f m of panel beside an opening", name, worst);
+        TraceLog(LOG_WARNING, "panelka: %s leaves only %.3f m of aggregate field beside an opening", name, worst);
     }
 }
 
+// The same walk, over the same table the builders read. The first build wrote every opening rectangle out a second time here, so this could only confirm that the two copies of the literals agreed; the panel it now tests is the panel that is actually built.
 static void CheckPanels(void)
 {
-    Rect w26 = WinRect(WIN_W26);
-    CheckOpenings("2.6 m window panel", 2.6f, STOREY, &w26, 1);
-    Rect w32 = WinRect(WIN_W32);
-    CheckOpenings("3.2 m window panel", 3.2f, STOREY, &w32, 1);
-    Rect bal[2] = {
-        { -1.300f, -1.300f + BDOOR_W, BDOOR_SILL, BDOOR_SILL + BDOOR_H },
-        { 0.100f, 0.100f + 1.200f, WIN_SILL, WIN_SILL + WIN_H },
-    };
-    CheckOpenings("balcony panel", 3.2f, STOREY, bal, 2);
-    Rect stLo = { -STAIR_W * 0.5f, STAIR_W * 0.5f, STAIR_SILL_LO, STAIR_SILL_LO + STAIR_H };
-    CheckOpenings("stairwell panel, low sill", 2.6f, STOREY, &stLo, 1);
-    Rect stHi = { -STAIR_W * 0.5f, STAIR_W * 0.5f, STAIR_SILL_HI, STAIR_SILL_HI + STAIR_H };
-    CheckOpenings("stairwell panel, high sill", 2.6f, STOREY, &stHi, 1);
-    Rect en = { -ENTRY_W * 0.5f, ENTRY_W * 0.5f, 0.0f, ENTRY_H };
-    CheckOpenings("entrance panel", 2.6f, STOREY, &en, 1);
+    for (int k = 0; k < PK_COUNT; k++) {
+        Rect op[MAX_OPENINGS];
+        int nop = PanelOpenings((PanelKind)k, op);
+        CheckOpenings(PANEL_KIND_NAME[k], PANEL_W[k], STOREY, op, nop);
+
+        // A break has to fall in solid panel, not through the middle of a window, or the two pieces meet with nothing between them and the panel is really three.
+        const PanelTypes *pt = &PANEL_TYPE[k];
+        if (pt->left == pt->whole) continue;
+        float br = PANEL_BREAK[k];
+        if (br <= -PANEL_W[k] * 0.5f + 0.100f || br >= PANEL_W[k] * 0.5f - 0.100f) {
+            TraceLog(LOG_ERROR, "panelka: %s breaks at %.3f, which is off the panel", PANEL_KIND_NAME[k], br);
+        }
+        for (int i = 0; i < nop; i++) {
+            if (br > op[i].x0 + 1e-4f && br < op[i].x1 - 1e-4f) {
+                TraceLog(LOG_WARNING, "panelka: %s breaks at %.3f, inside its opening %d", PANEL_KIND_NAME[k], br, i);
+            }
+        }
+    }
+}
+
+// A type that is placed but never built draws nothing at all, and there is no way to see the difference between that and a piece hidden behind another one. With sixty types and eleven of them differing from a neighbour only by which half of a panel they are, that is the failure this revision is most exposed to.
+static void CheckTypesBuilt(void)
+{
+    int placed = 0, silent = 0, unused = 0;
+    for (int t = 0; t < FR_COUNT; t++) {
+        bool built = false;
+        for (int m = 0; m < MAT_COUNT; m++) built = built || gType[t].has[m];
+        if (gTypeCount[t] > 0) {
+            placed++;
+            if (!built) {
+                TraceLog(LOG_ERROR, "panelka: type %s is placed %d times and has no mesh",
+                         TYPE_NAME[t], gTypeCount[t]);
+                silent++;
+            }
+        } else if (built) {
+            TraceLog(LOG_WARNING, "panelka: type %s is built and never placed", TYPE_NAME[t]);
+            unused++;
+        }
+    }
+    TraceLog(LOG_INFO, "panelka: %d of %d types are placed, %d silent, %d built and unused",
+             placed, FR_COUNT, silent, unused);
+}
+
+// The whole point of the flat is that no two of the sixty agree about everything, and every part of that is a hash: a seed that happened to collapse, or a table indexed past its end and clamped, would leave the facade uniform again without anything failing. So count what the hashes actually produced.
+static void CheckFlatVariety(void)
+{
+    int pvc = 0, ac = 0, bal[3] = { 0, 0, 0 };
+    int frames[COUNT_OF(TIMBER_PAINT)] = { 0 }, curtains[COUNT_OF(CURTAIN)] = { 0 };
+    int n = 0;
+    for (int s = 0; s < SECTIONS; s++) {
+        for (int f = 0; f < FLOORS; f++) {
+            for (int side = 0; side < 2; side++) {
+                for (int h = 0; h < 2; h++) {
+                    Flat fl = FlatAt(s, f, side, h);
+                    n++;
+                    if (fl.pvc) pvc++;
+                    if (fl.ac) ac++;
+                    bal[fl.balcony]++;
+                    for (int k = 0; k < COUNT_OF(TIMBER_PAINT); k++) {
+                        if (ColorToInt(TIMBER_PAINT[k]) == ColorToInt(fl.frame)) { frames[k]++; break; }
+                    }
+                    for (int k = 0; k < COUNT_OF(CURTAIN); k++) {
+                        if (ColorToInt(CURTAIN[k]) == ColorToInt(fl.curtain)) { curtains[k]++; break; }
+                    }
+                }
+            }
+        }
+    }
+    int distinctCurtains = 0;
+    for (int k = 0; k < COUNT_OF(CURTAIN); k++) if (curtains[k] > 0) distinctCurtains++;
+    TraceLog(LOG_INFO, "panelka: %d flats, %d with plastic windows, %d with an air conditioner; balconies %d open, %d glazed in timber, %d in plastic; %d of %d curtain colours used",
+             n, pvc, ac, bal[BAL_OPEN], bal[BAL_TIMBER], bal[BAL_PVC], distinctCurtains, COUNT_OF(CURTAIN));
+    if (pvc == 0 || pvc == n || bal[BAL_OPEN] == n || distinctCurtains < 3) {
+        TraceLog(LOG_ERROR, "panelka: the flat hashes have collapsed and the facade is uniform");
+    }
 }
 
 // A window head must clear the ceiling it is cut under, and a balcony door must clear the slab it opens onto. Both are one subtraction, and both are the kind of thing that stops being true the moment someone changes STOREY.
@@ -2662,7 +3318,7 @@ static void CheckCollapse(void)
     float last = 0.0f, throwOut = 0.0f, deepest = 1e9f;
     int airborne = 0, entombed = 0;
     for (int i = 0; i < gFragCount; i++) {
-        if (!IsBuilding(gFrag[i].type) && gFrag[i].type != FR_RUBBLE) continue;
+        if (!IsDebris(gFrag[i].type)) continue;
         const Motion *m = &gMotion[i];
         last = fmaxf(last, m->t1);
         if (m->t1 > CYCLE) airborne++;
@@ -2729,16 +3385,6 @@ static void CheckFlashSampling(void)
 // Scene
 // ---------------------------------------------------------------------------
 
-static const char *TYPE_NAME[FR_COUNT] = {
-    "p26", "p32", "p32b", "pstair", "pstair2", "pdoor", "pend",
-    "g26", "g32", "g32b", "gstair", "gstair2", "gdoor",
-    "slab26", "slab32", "roof26", "roof32",
-    "xwall", "spine26", "spine32",
-    "balc", "balcg", "par26", "par32", "parend", "canopy", "vent", "pipe", "mast",
-    "rubble",
-    "birch", "maple", "carbody", "cartrim", "bench", "rugframe", "lamp", "bin",
-};
-
 // The one scene-wide thing this model sets that is normally the harness's business, and it is
 // here because the harness's three lights are point lights standing at (8,10,8), (-9,5,-7) and
 // (0,-9,5). Those surround a 4.5 m vehicle. They sit *inside* a 58 m building, so every outward
@@ -2802,7 +3448,7 @@ static void Init(void)
     // fitted to the pile's own shape. Nothing about it is chosen.
     float material = 0.0f;
     for (int i = 0; i < gFragCount; i++) {
-        if (!IsBuilding(gFrag[i].type) && gFrag[i].type != FR_RUBBLE) continue;
+        if (!IsDebris(gFrag[i].type)) continue;
         float sc = gFrag[i].scale;
         material += gType[gFrag[i].type].volume * sc * sc * sc;
     }
@@ -2810,6 +3456,10 @@ static void Init(void)
     SolveLanding();
     TraceLog(LOG_INFO, "panelka: %.0f m3 of material bulks to %.0f; the packed pile crests at %.2f m against a %.2f m prediction",
              material, material * BULK_FACTOR, PileCrest(), PredictedCrest(material));
+
+    // After the landings, not before: this is the one dust population that knows where anything went.
+    AddImpactDust();
+    gDust.instCount = gPuffCount;
 
     Update(0.0f);
 
@@ -2829,6 +3479,8 @@ static void Init(void)
 
     CheckBaysTile();
     CheckPanels();
+    CheckTypesBuilt();
+    CheckFlatVariety();
     CheckHeadroom();
     CheckBalconyRoot();
     CheckStructureMeets();
