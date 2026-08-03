@@ -1216,7 +1216,7 @@ typedef struct {
     float shade;     // per-instance brightness, so 105 copies of one mesh are not 105 identical panels
 } Fragment;
 
-#define MAX_FRAG 3200
+#define MAX_FRAG 5200
 static Fragment gFrag[MAX_FRAG];
 static int gFragCount;
 
@@ -1433,7 +1433,8 @@ static void BuildFacadeTypes(void)
 // How long a piece of slab or cross wall is. The full span from the facade to the spine is 5.71 m, and this lays it as two, so what ends up in the pile is a plate the length of a room rather than one the depth of the building.
 //
 // It costs no type and no geometry: a piece authored about its own centre is placed twice, and KNIT closes the two together so the intact building is unchanged. What it changes is the pile, where the first build stacked intact 5.7 m plates and 11.2 m cross walls, which is the one thing about that pile nobody could look at and believe.
-#define SPAN_PIECE    ((INNER_Z + SLAB_BEAR) * 0.5f)
+#define SPAN_PIECE    ((INNER_Z + SLAB_BEAR) / 3.0f)
+#define SPAN_PIECES   3
 
 // A piece of floor slab, authored about its own centre at the underside of the structural slab.
 static void BuildSlab(Group *g, float w, MatId top)
@@ -1445,6 +1446,9 @@ static void BuildSlab(Group *g, float w, MatId top)
 
 // Where the centre of piece `i` sits, measured out from the spine along -Z. Two pieces reach from the spine centre-line to SLAB_BEAR inside the facade panel, which is the 5.76 m the series casts its slabs to less the 0.05 the bearing eats; the far side of the building is the same two mirrored.
 static float SpanPieceZ(int i) { return -SPAN_PIECE * (0.5f + (float)i); }
+
+// Every run of pieces, near side and far, which is what the placement walks so that changing SPAN_PIECES changes the building in one place.
+#define FOR_SPAN(side, i) for (int side = 0; side < 2; side++) for (int i = 0; i < SPAN_PIECES; i++)
 
 static void BuildStructureTypes(void)
 {
@@ -1935,7 +1939,7 @@ static void PlaceYard(void)
 // footprint, so a chunk appears where its parent was and the dust covers its arrival.
 static void PlaceRubble(void)
 {
-    const int N = 240;
+    const int N = 340;
     for (int i = 0; i < N; i++) {
         float x = (Hash2(i, 41, 4096, 191u) - 0.5f) * BLOCK_LEN * 0.98f;
         float z = (Hash2(i, 42, 4096, 193u) - 0.5f) * 2.0f * FACE_Z * 0.92f;
@@ -1944,7 +1948,7 @@ static void PlaceRubble(void)
                0.50f + 1.35f * Hash2(i, 45, 4096, 211u), WHITE);
     }
     // The fines come off the cut rather than out of the whole volume, because that is where the concrete is actually being broken, and they go outwards and low.
-    const int M = 300;
+    const int M = 460;
     for (int i = 0; i < M; i++) {
         float x = (Hash2(i, 46, 4096, 223u) - 0.5f) * BLOCK_LEN;
         float z = (Hash2(i, 47, 4096, 227u) - 0.5f) * 2.0f * FACE_Z;
@@ -2080,7 +2084,8 @@ static bool PanelFractures(PanelKind k, int s, int f, int bay, int side)
 {
     const PanelTypes *pt = &PANEL_TYPE[k];
     if (pt->left == pt->whole) return false;
-    return Hash2(((s * FLOORS + f) * BAYS + bay) * 2 + side, 9, 4096, 661u) < 0.60f;
+    // Kind-dependent, so the twelve placements of a rare kind draw from a different sequence than the two hundred of a common one. Left sharing one sequence at 0.85, every one of the twelve plain 3.2 m panels happened to fracture and CheckTypesBuilt reported the whole-panel mesh built and never placed -- harmless in itself, and exactly the alarm that check exists to raise, so the cure is to stop it being a coin flip rather than to lower the threshold until it stops landing badly.
+    return Hash2(((s * FLOORS + f) * BAYS + bay) * 2 + side, 9 + (int)k * 31, 4096, 661u) < 0.82f;
 }
 
 // One panel of the facade, with everything that hangs on it: the panel itself (whole, or the two pieces it will break into), the joinery and its pane, and whatever the flat behind it has fixed to the wall.
@@ -2132,11 +2137,7 @@ static void PlaceBuilding(void)
 
                 // Floor slabs: two pieces each side of the spine, so what lands in the pile is a plate the length of a room.
                 FragType slab = (BAY_W[b] > 2.9f) ? FR_SLAB32 : FR_SLAB26;
-                for (int side = 0; side < 2; side++) {
-                    for (int i = 0; i < 2; i++) {
-                        Emit(slab, x, y - SLAB_T, (side == 0) ? SpanPieceZ(i) : -SpanPieceZ(i), 0.0f);
-                    }
-                }
+                FOR_SPAN(side, i) Emit(slab, x, y - SLAB_T, (side == 0) ? SpanPieceZ(i) : -SpanPieceZ(i), 0.0f);
 
                 Emit((BAY_W[b] > 2.9f) ? FR_SPINE32 : FR_SPINE26, x, y, 0.0f, 0.0f);
 
@@ -2170,11 +2171,7 @@ static void PlaceBuilding(void)
                 if (x < -end + 1e-3f) x += WALL_T + XWALL_T * 0.5f - 0.010f;
                 else if (x > end - 1e-3f) x -= WALL_T + XWALL_T * 0.5f - 0.010f;
 
-                for (int side = 0; side < 2; side++) {
-                    for (int i = 0; i < 2; i++) {
-                        Emit(FR_XWALL, x, y, (side == 0) ? SpanPieceZ(i) : -SpanPieceZ(i), 0.0f);
-                    }
-                }
+                FOR_SPAN(side, i) Emit(FR_XWALL, x, y, (side == 0) ? SpanPieceZ(i) : -SpanPieceZ(i), 0.0f);
             }
 
             // End walls, four panels across the depth, on the two ends of the block only.
@@ -2210,11 +2207,7 @@ static void PlaceBuilding(void)
         for (int b = 0; b < BAYS; b++) {
             float x = BayX(s, b);
             FragType roof = (BAY_W[b] > 2.9f) ? FR_ROOF32 : FR_ROOF26;
-            for (int side = 0; side < 2; side++) {
-                for (int i = 0; i < 2; i++) {
-                    Emit(roof, x, ROOF_Y - SLAB_T, (side == 0) ? SpanPieceZ(i) : -SpanPieceZ(i), 0.0f);
-                }
-            }
+            FOR_SPAN(side, i) Emit(roof, x, ROOF_Y - SLAB_T, (side == 0) ? SpanPieceZ(i) : -SpanPieceZ(i), 0.0f);
             Emit((BAY_W[b] > 2.9f) ? FR_PAR32 : FR_PAR26, x, ROOF_Y, FACE_Z, 0.0f);
             Emit((BAY_W[b] > 2.9f) ? FR_PAR32 : FR_PAR26, x, ROOF_Y, -FACE_Z, 180.0f);
         }
@@ -2443,17 +2436,25 @@ static void PileCell(float x, float z, int *ix, int *iz)
     *iz = (int)Clamp((z + FACE_Z + PILE_MARGIN) / PILE_CELL, 0.0f, (float)(PILE_NZ - 1));
 }
 
-// The highest thing already under a footprint, which is what a piece landing on it rests on.
+// What a piece landing on a footprint comes to rest on.
+//
+// Not simply the highest cell under it. A rigid plate does rest on the highest point it touches, and taking the maximum is what the first version of this did; with the slabs and cross walls broken into thirds it then ran the crest to 8.5 m on a 14.3 m building, where the same material spread as a smooth mound predicts 4.6 and a real demolition pile is a quarter to a third of the building's height. Each small piece perched on the last one's high corner, and the error compounded over 3500 of them.
+//
+// Weighted towards the mean instead, which says that a pile of broken concrete crushes and settles under what lands on it rather than holding every point of its own relief. The weight is the one number here fitted to an outcome rather than derived, and CheckCollapse prints the packed crest against the smooth-mound prediction so that the fit stays visible.
+#define PILE_PERCH  0.30f
+
 static float PileUnder(float x, float z, float hx, float hz)
 {
     int x0, z0, x1, z1;
     PileCell(x - hx, z - hz, &x0, &z0);
     PileCell(x + hx, z + hz, &x1, &z1);
-    float top = 0.0f;
+    float top = 0.0f, sum = 0.0f;
+    int n = 0;
     for (int i = x0; i <= x1; i++) {
-        for (int j = z0; j <= z1; j++) top = fmaxf(top, gHeight[i][j]);
+        for (int j = z0; j <= z1; j++) { top = fmaxf(top, gHeight[i][j]); sum += gHeight[i][j]; n++; }
     }
-    return top;
+    if (n == 0) return 0.0f;
+    return Lerp(sum / (float)n, top, PILE_PERCH);
 }
 
 // What a fragment adds to the pile is its own material, spread over its own footprint, and
@@ -2570,22 +2571,23 @@ static void PlanFragment(int i)
         out = 3.0f + 3.2f * Rand01(i, 4);
         up = 1.1f + 1.9f * Rand01(i, 5);
     } else if (glazed) {
-        // Every window in the building goes at the shock, not when its own storey is reached.
+        // Every window in the building goes at the shock, not when its own storey is reached. It goes *out* of its frame and falls, though, at a fraction of the speed it once had: a review round read the first second of the sequence as the skin being explosively removed from a standing building, and 210 panes leaving at 8 m/s while nothing above them had moved yet was most of that picture.
         m->t0 = T_BLAST + seq + 0.05f * Rand01(i, 6);
-        out = 3.6f + 4.2f * Rand01(i, 7);
-        up = 0.4f + 1.2f * Rand01(i, 8);
+        out = 1.1f + 1.7f * Rand01(i, 7);
+        up = 0.15f + 0.55f * Rand01(i, 8);
     } else if (balcony) {
-        // A cantilever with nothing above it, so it goes before the wall it hangs on.
-        m->t0 -= 0.22f;
-        out = 1.1f + 0.10f * height + 0.8f * Rand01(i, 9);
+        // A cantilever, so it fails as its own storey is reached rather than with the wall behind it -- but after, not before. Going 0.22 s early put a ring of balconies in the air around a block that was still standing at full height.
+        m->t0 += 0.12f;
+        out = 0.8f + 0.07f * height + 0.6f * Rand01(i, 9);
     } else if (cls == FC_SKIN || cls == FC_FITTING) {
         // A review round read the first pass as the facade being explosively blown off while the
         // roof stayed level over it. What actually happens is that the lower storeys lose support
         // and the mass above starts down before anything peels, so the skin now waits a fifth of
         // a second longer than the structure at its own height and leaves with a third of the
         // outward speed it had. The peel then comes from the tumble and the fall rather than a kick.
-        m->t0 += 0.20f;
-        out = 0.25f + 0.038f * height + 0.45f * Rand01(i, 10);
+        // Nearly half a second behind the structure at its own height, where the first attempt at this used a fifth of one. What actually happens is that the lower storeys lose support and the mass above starts down before anything peels, so the peel has to come out of the tumble and the fall rather than out of a kick.
+        m->t0 += 0.42f;
+        out = 0.18f + 0.030f * height + 0.35f * Rand01(i, 10);
     } else if (cls == FC_RUBBLE) {
         m->t0 = T_BLAST + seq + climb * 0.75f + 0.35f * Rand01(i, 18);
         out = 1.3f + 3.4f * Rand01(i, 19);
@@ -2593,13 +2595,15 @@ static void PlanFragment(int i)
         along = 2.6f * Rand11(i, 21);
     } else {
         // Slabs, cross walls and the spine drop; they are what the pile is made of.
+        // Each with its own small delay, so a floor does not come down as one plane. Sharing a release time to the millisecond is what kept the roof legible as a complete deck through the middle of the sequence, sitting in its original plane while the facade under it had already gone.
+        m->t0 += 0.19f * Rand01(i, 22);
         out = 0.25f * Rand01(i, 11);
         up = -0.3f * Rand01(i, 12);
     }
 
     m->v0 = (Vector3){ along, up, sz * out };
     m->axis = Vector3Normalize((Vector3){ Rand11(i, 13) + 0.05f, Rand11(i, 14) * 0.4f, Rand11(i, 15) });
-    m->omega = (glazed ? 3.4f : balcony ? 1.9f : 0.7f) * (0.5f + Rand01(i, 16)) * (Rand01(i, 17) < 0.5f ? -1.0f : 1.0f);
+    m->omega = (glazed ? 3.4f : balcony ? 1.9f : cls == FC_STRUCT ? 1.25f : 0.7f) * (0.5f + Rand01(i, 16)) * (Rand01(i, 17) < 0.5f ? -1.0f : 1.0f);
     if (cls == FC_RUBBLE) m->omega *= 4.0f;
 
     m->t0 = fmaxf(m->t0, T_BLAST + seq);
@@ -2669,7 +2673,7 @@ static void AddPuff(Vector3 p, Vector3 v, float t0, float life, float r0, float 
 
 static void PlaceDust(void)
 {
-    const int SURGE = 400, COLUMN = 190;
+    const int SURGE = 360, COLUMN = 120;
 
     for (int i = 0; i < SURGE; i++) {
         // Born on the footprint's perimeter, as the firing sequence reaches that x.
@@ -2697,7 +2701,8 @@ static void PlaceDust(void)
         float y = 0.8f + 5.0f * Hash2(i, 23, 4096, 139u);
 
         float seq = SEQ_LEN * (x + BLOCK_LEN * 0.5f) / BLOCK_LEN;
-        float t0 = T_BLAST + seq + 0.55f + 2.4f * Hash2(i, 24, 4096, 149u);
+        // Later than it was, because the column is what rises off a pile that already exists, and it was arriving in time to hang evenly over a block that was still coming down.
+        float t0 = T_BLAST + seq + 1.15f + 2.4f * Hash2(i, 24, 4096, 149u);
 
         Vector3 v = { (Hash2(i, 25, 4096, 151u) - 0.5f) * 4.0f,
                       3.4f + 5.2f * Hash2(i, 26, 4096, 157u),
@@ -2904,7 +2909,8 @@ static void AddImpactDust(void)
         float sc = gFrag[i].scale;
         float vol = gType[gFrag[i].type].volume * sc * sc * sc;
         if (vol < 0.25f) continue;
-        if (Hash2(i, 71, 4096, 743u) > 0.26f) continue;
+        // Anything the size of a slab raises dust every time. Leaving that to a hash meant three quarters of the most conspicuous landings -- the plates that reach the debris skirt, which is where a demolition throws its most visible dust -- arrived in silence.
+        if (vol < 1.10f && Hash2(i, 71, 4096, 743u) > 0.30f) continue;
 
         Vector3 c = Vector3Transform(m->c, FlightPose(i, m->t1));
         // How hard it arrived, which is what sets how much it throws up. Ballistic, so this is just the fall.
@@ -2988,6 +2994,25 @@ static Matrix YardPose(int i, float t)
         default:
             tilt = Lash(t, arrive, 0.055f * near, 2.4f, 2.2f);
             break;
+    }
+
+    // And then the debris arrives.
+    //
+    // Nothing here resolves a collision, and adding one is not what this is: the pile is already solved, cell by cell, before the first frame is drawn, so how deep the rubble ends up over any point of the yard is a number this function can simply look up. What it cannot do is leave a birch standing vertically through four metres of it, which is what a review round found in every frame after the fourth -- a tree, a lamp post and a car intact inside a volume full of slabs.
+    //
+    // So anything the pile reaches goes over, away from the building, and sinks into what buried it. The threshold is a third of a metre, which is a scatter of chunks rather than a pile; below that a thing in the yard has been hit by the blast and nothing else.
+    float pile = PileUnder(f->pos.x, f->pos.z, 1.0f, 1.0f);
+    if (pile > 0.35f) {
+        // The debris front is slower than the air blast that precedes it, and it does not reach the far side of the courtyard at all.
+        float a = t - (arrive + 0.30f + 0.030f * dist);
+        if (a > 0.0f) {
+            float over = fminf(1.0f, a / 1.10f);
+            over = over * over * (3.0f - 2.0f * over);
+            // Flat, or nearly. A lamp post lies down; a tree with a crown on it does not quite.
+            float flat = (f->type == FR_BIRCH || f->type == FR_MAPLE) ? 1.28f : 1.48f;
+            tilt = Lerp(tilt, (tilt < 0.0f ? -flat : flat), over);
+            lift -= fminf(pile, 3.0f) * 0.55f * over;
+        }
     }
 
     if (fabsf(tilt) < 1e-5f && fabsf(lift) < 1e-5f) return FragRest(f);
@@ -3399,6 +3424,21 @@ static void CheckCollapse(void)
     // final grid standing above it means later material came down on top -- which is what a pile
     // is. It is reported rather than warned about, and the number to watch is the deepest.
     TraceLog(LOG_INFO, "panelka: the deepest fragment ends %.1f m under the finished pile surface", -deepest);
+
+    // What the yard ends up under. A review round found a birch standing vertically through several metres of rubble, which is the kind of thing that is obvious in a render and invisible in a number until somebody prints the number.
+    int buried = 0, standing = 0;
+    float worstStanding = 0.0f;
+    for (int i = 0; i < gFragCount; i++) {
+        if (FR_CLASS[gFrag[i].type] != FC_YARD) continue;
+        float pile = PileUnder(gFrag[i].pos.x, gFrag[i].pos.z, 1.0f, 1.0f);
+        if (pile > 0.35f) buried++;
+        else { standing++; worstStanding = fmaxf(worstStanding, pile); }
+    }
+    TraceLog(LOG_INFO, "panelka: %d things in the yard end up under the pile and go over, %d stay standing, the deepest of those in %.2f m of debris",
+             buried, standing, worstStanding);
+    if (worstStanding > 0.35f) {
+        TraceLog(LOG_WARNING, "panelka: something in the yard is standing upright in %.2f m of rubble", worstStanding);
+    }
 }
 
 // A demolition is not periodic, and this is the one model here whose loop deliberately does not
@@ -3597,7 +3637,7 @@ const Scene SCENE = {
         "Those are the specified 2.6 and 3.2 m to within 3.5 per cent, so the bays here are 2.6, 3.2, 2.6, 2.6, 2.6, 3.2, 2.6 = 19.40 m per section, the depth is 2 x 5.76 plus one 0.30 m wall, and the storey is 2.50 of clear ceiling plus a 0.10 structural slab plus 0.06 of screed = 2.66 m. The screed is the only invented number in that sum.\n"
         "\n"
         "The building is precast panels, not a shell with holes in it.\n"
-        "There is one mesh per panel type and a list of transforms saying where the instances go, which is what makes the joint grid real rather than drawn on, and which is the decomposition the demolition will throw. 60 types and 2787 fragments.\n"
+        "There is one mesh per panel type and a list of transforms saying where the instances go, which is what makes the joint grid real rather than drawn on, and which is the decomposition the demolition will throw. 60 types and 3569 fragments.\n"
         "Openings are cut by decomposing a panel into horizontal bands at every opening edge and, within a band, into the x-segments the openings leave: any number of openings then needs no special case, and every reveal is the side of a closed box. A layer is given its absolute extent rather than an inset off the panel, which is what lets the same function cut a whole panel, the aggregate field set back inside it, and a fracture piece that ends at a break on one side and at the panel on the other.\n"
         "\n"
         "The panel face, which is the thing this revision is mostly about.\n"
@@ -3621,7 +3661,7 @@ const Scene SCENE = {
         "The roof is flat, with a 0.21 m upstand under a metal capping that oversails the facade by 0.085 -- a thin capped cornice rather than a parapet, which is what ref_03 and ref_05 show and which 0.32 m of exposed upstand read as a modern fascia band running the whole building. The series specifies the original directly, as a flat non-ventilated roof finished in rolled bitumen; the pitched metal roofs in ref_02 and ref_07 are the re-roofing thousands of these were given in the 1990s.\n"
         "\n"
         "Behind the skin the structure is real, because the demolition has to break it: floor slabs spanning bay by bay from the facade to the central spine, a spine wall segment per bay, and a cross wall on every bay boundary, which is the load-bearing direction in this series.\n"
-        "A slab and a cross wall are each laid as pieces the length of a room rather than as one plate the depth of the building. It costs no type and no geometry -- a piece authored about its own centre is placed twice and KNIT closes the two together -- and it is the pile it changes, where an earlier build stacked intact 5.7 m plates and 11.2 m cross walls.\n"
+        "A slab and a cross wall are each laid as three pieces across the span rather than as one plate the depth of the building. It costs no type and no geometry -- a piece authored about its own centre is placed three times and KNIT closes them together -- and it is the pile it changes, where an earlier build stacked intact 5.7 m plates and 11.2 m cross walls. Two pieces was the first attempt and a review round still read the pile as a heap of intact architectural cards.\n"
         "\n"
         "The yard.\n"
         "Sixteen trees, five cars, six benches, two rug-beating frames, two bins and four lamp posts, all of them instanced types like the building, because a tree the blast is going to lash and a car it is going to bury both have to be things the pose function can move.\n"
@@ -3636,20 +3676,23 @@ const Scene SCENE = {
         "It flies, ballistically, tumbling about its own centroid rather than its local origin, which would be a hinge no broken panel has. The drop it had already taken at its release time is exactly where the flight starts, so the two meet without a step.\n"
         "And it lands. There is no contact between fragments in flight: nothing here resolves a collision, because at this scale what reads is the timing and the peel rather than any individual impact.\n"
         "Three in five facade panels crack as they go, at the side of an opening, which is where the section is thinnest; the blank gable has no opening, so its break is simply off centre, because two congruent halves read as a cut rather than as a fracture. It is three in five rather than all of them because a demolition leaves some panels whole and a facade every one of which cracks identically reads as a pattern rather than as damage. A break is not an edge: where a slice ends inside the panel both layers run past it instead of setting back, so the two halves are indistinguishable from the whole panel until they separate.\n"
-        "Glazing is the exception to the crush front: every pane in the building goes at the shock rather than when its own storey is reached, thrown 3.6 to 7.8 m/s and spinning five times faster than a panel. Balconies are the other: a cantilever with nothing above it, so it fails 0.22 s early, clamped so that nothing anywhere moves before the charges it is a consequence of.\n"
+        "Glazing is the exception to the crush front: every pane in the building goes at the shock rather than when its own storey is reached, spinning five times faster than a panel -- but leaving at 1.1 to 2.8 m/s, not the 3.6 to 7.8 it once had. A balcony fails as its own storey is reached and 0.12 s after it, not 0.22 s before. The skin waits 0.42 s behind the structure at its own height, where a first attempt used 0.20.\n"
+        "All three of those numbers moved for one reason. A review round read the first second of the sequence as the skin being explosively removed from a standing building rather than as a building losing its footing: 210 panes leaving at 8 m/s and a ring of balconies in the air while nothing above them had moved yet. The peel now has to come out of the tumble and the fall rather than out of a kick, which is what it comes out of in the films. Structural pieces also get their own release jitter of up to 0.19 s, because sharing a release time to the millisecond kept the roof legible as a complete deck through the middle of the sequence, sitting in its original plane over a facade that had already gone.\n"
         "\n"
-        "Where a piece comes to rest is decided by what is already there. The pile is a heightfield, and the fragments are planned in the order they land: each is put on top of whatever is in the cells its own footprint covers, and then deposits its own material -- volume by the divergence theorem, bulked by 1.55 -- spread over that footprint. 1967 m3 becomes 3049 of rubble and the packed pile crests at 6.6 m, against 4.4 m for a smooth mound of the same material; rigid pieces leave voids a smooth mound does not, and breaking the slabs and walls into room-length pieces widened that gap, which is the expected direction.\n"
+        "Where a piece comes to rest is decided by what is already there. The pile is a heightfield, and the fragments are planned in the order they land: each is put on top of whatever is in the cells its own footprint covers, and then deposits its own material -- volume by the divergence theorem, bulked by 1.55 -- spread over that footprint. 2072 m3 becomes 3212 of rubble and the packed pile crests at 5.9 m, against 4.6 m for a smooth mound of the same material.\n"
+        "What a piece rests on is weighted towards the mean of the cells under it rather than their maximum. Taking the maximum is what a rigid plate really does, and it is what this did until the slabs and walls were broken into thirds; with 3569 fragments each perching on the last one\'s high corner the error compounded and the crest ran to 8.5 m on a 14.3 m building, where a real demolition pile is a quarter to a third of the building\'s height. The weight is the one number in the collapse fitted to an outcome rather than derived, and CheckCollapse prints the packed crest against the smooth-mound prediction on every build so that the fit stays visible.\n"
         "Both the landing point and the fragment\'s own extent depend on the flight time, and the flight time on both, so each is solved by four passes of the same substitution. The extent is taken at the orientation the piece actually lands in, from the support function of its transformed box, not from its upright height: a 2.66 m panel that comes down edge-on has a vertical extent of 0.15.\n"
         "\n"
-        "Dust is four populations, because one averaging them reads as ground fog. The jets are what comes straight back out of the drill holes at the instant the charges fire -- small, fast, outward at 15 to 24 m/s, dead inside two seconds. The surge is air driven out sideways by the floors slamming down on it, which leaves the footprint low and rolls outwards along the ground. The column is what rises off the pile afterwards, slower and much taller.\n"
-        "The fourth is new, and it is the only one that knows anything about this particular collapse. The other three are placed before anything is thrown, off the footprint and the firing sequence, so they bloom whether or not anything has landed, they bloom evenly along a block whose two ends land three tenths of a second apart, and they say nothing about the debris skirt, where the largest pieces end up and where a demolition throws its most conspicuous dust. This one is placed after the landings are solved, so a puff exists because a slab hit the pile there at that moment, scaled by how big the piece was and how hard it arrived, on a hashed quarter of the landings big enough to raise anything: 462 of them, of 1242 puffs in all.\n"
+        "Dust is four populations, because one averaging them reads as ground fog. 1560 puffs in all. The jets are what comes straight back out of the drill holes at the instant the charges fire -- small, fast, outward at 15 to 24 m/s, dead inside two seconds. The surge is air driven out sideways by the floors slamming down on it, which leaves the footprint low and rolls outwards along the ground. The column is what rises off the pile afterwards, slower and much taller.\n"
+        "The fourth is new, and it is the only one that knows anything about this particular collapse. The other three are placed before anything is thrown, off the footprint and the firing sequence, so they bloom whether or not anything has landed, they bloom evenly along a block whose two ends land three tenths of a second apart, and they say nothing about the debris skirt, where the largest pieces end up and where a demolition throws its most conspicuous dust. This one is placed after the landings are solved, so a puff exists because a slab hit the pile there at that moment, scaled by how big the piece was and how hard it arrived. Anything the size of a slab raises dust every time and the smaller pieces take a hashed third, which is 890 landings. Leaving the big ones to a hash was the first attempt and it meant three quarters of the most conspicuous arrivals -- the plates that reach the debris skirt, which is where a demolition throws its most visible dust -- landed in silence. The column population was cut and delayed by 0.6 s in the same pass, because it was arriving in time to hang evenly over a block that was still coming down.\n"
         "A puff is thrown and then sheds its speed to the air as a first-order decay to a terminal displacement, which is why dust travels so much further than a thrown solid and then simply hangs.\n"
         "The soft edge is a second small shader, and both it and the technique are models/humvee.c\'s. A closed blob has a hard silhouette at any subdivision, so a puff\'s alpha is scaled by how squarely its surface faces the camera, which is zero exactly at its own silhouette; its normals are radial, of the sphere the lumps are pushed out from rather than of the lumpy surface, so that falloff runs monotonically to the edge instead of leaving a ring of zero alpha inside it. The detonation flashes run the same shader, additively.\n"
         "The charges are milliseconds of light, and --anim samples the cycle at N evenly spaced phases, so a truthful flash would be caught only by luck. It is held over 0.30 s instead -- a playback concession, not a claim about explosives -- which puts the window at 0.90 to 1.20 s and straddles t = 1.0, so every --frames that is a multiple of 6 lands a frame inside it.\n"
         "\n"
-        "The yard is not destroyed but it is not untouched. An air blast leaves the building when the charges fire and travels at 105 m/s, so the lashing runs outwards across the scene rather than happening to everything at once; what it reaches gets one damped oscillation, scaled by distance. Trees lean 17 degrees at 0.62 Hz, cars rock on their springs at 1.65, and the benches and bins closest to the facade go over and stay over. A tree can only hinge at its root here: skinning needs bone attributes the harness\'s shader does not declare, so a rigid trunk leaning is the honest limit rather than a choice, where a real tree bends most at the top.\n"
+        "The yard is not destroyed but it is not untouched. An air blast leaves the building when the charges fire and travels at 105 m/s, so the lashing runs outwards across the scene rather than happening to everything at once; what it reaches gets one damped oscillation, scaled by distance. Trees lean 17 degrees at 0.62 Hz, cars rock on their springs at 1.65, and the benches and bins closest to the facade go over and stay over.\n"
+        "And then the debris arrives. Nothing here resolves a collision and this does not add one: the pile is solved cell by cell before the first frame is drawn, so how deep the rubble ends up over any point of the yard is a number the pose function can look up. Anything standing in more than 0.35 m of it goes over, away from the building, and sinks into what buried it; ten of the forty things in the yard do. It exists because a review round found a birch standing vertically through several metres of rubble, with a lamp post and a car intact beside it, in every frame after the fourth. CheckCollapse now prints how many go under and how deep the deepest of those still standing is, which is 0.29 m. A tree can only hinge at its root here: skinning needs bone attributes the harness\'s shader does not declare, so a rigid trunk leaning is the honest limit rather than a choice, where a real tree bends most at the top.\n"
         "\n"
-        "This is the one model here whose loop deliberately does not close. A demolition is a one-shot event, and --anim plays it once; rather than pretend otherwise, CheckLoopSeam measures the seam and reports it, and it is 18.1 m at the worst fragment. The last piece lands at 3.4 s of the 6 s cycle, thrown up to 13.7 m clear of the footprint.\n"
+        "This is the one model here whose loop deliberately does not close. A demolition is a one-shot event, and --anim plays it once; rather than pretend otherwise, CheckLoopSeam measures the seam and reports it, and it is 14.4 m at the worst fragment. The last piece lands at 3.6 s of the 6 s cycle, thrown up to 7.7 m clear of the footprint.\n"
         "\n"
         "Thirteen build-time checks, of which three are about this revision and all three earned their place on the run that added them. CheckTypesBuilt reports any type that is placed and has no mesh -- which with sixty types, eleven of them differing from a neighbour only by which half of a panel they are, is the failure this decomposition is most exposed to -- and any type built and never placed, which is how the ground-floor balconies were caught. CheckFlatVariety counts what the flat hashes actually produced, because a seed that collapsed or a table indexed past its end would leave the facade uniform again without anything failing.\n"
         "CheckStructureInside measures how far any slab, cross wall or spine reaches past the skin it stands behind, and it is the check the block\'s ends needed and did not have. The cross wall closing each end was centred on the block\'s end plane, so it stood 0.07 m outside the gable and hid all twenty of its panels behind a blank grey strip banded once per storey by its own gap at each floor. That survived the first build and two review rounds, because what a critique could say was that the gable read as under-divided, which sent two sessions looking at the gable\'s own decomposition, where the gable was not what was being drawn there at all. A defect that hides the thing you would inspect to find it is not found by looking harder. The wall is now pulled inboard until its outer face is buried 10 mm inside the panel, derived from that panel rather than typed.\n"
