@@ -878,9 +878,10 @@ static const float BAY_W[BAYS] = { 2.6f, 3.2f, 2.6f, 2.6f, 2.6f, 3.2f, 2.6f };
 #define ROOF_Y        (PLINTH_Y + FLOORS * STOREY)      // 14.25, top of the fifth-floor ceiling
 // Flat, which is the series' own specification and what ref_03 and ref_05 show; the pitched metal roofs in ref_02 and ref_07 are the re-roofing thousands of these got in the 1990s, not the building.
 // What those two do show is a thin cornice with a metal capping that oversails it, not the 0.45 m parapet this model first had.
-#define PARAPET_H     0.320f
+// A thin capped cornice, not a parapet. ref_03 and ref_05 both show the flat roof ending in a shallow upstand under a metal coping, with almost none of the upstand's outer face exposed; a review round read 0.320 m of it as a modern fascia band running the whole building.
+#define PARAPET_H     0.210f
 #define PARAPET_T     0.180f
-#define CORNICE_O     0.110f   // how far the capping oversails the facade below it
+#define CORNICE_O     0.085f   // how far the capping oversails the facade below it
 
 // Openings. Sills are measured up from the floor the panel stands on.
 #define WIN_SILL      0.850f
@@ -1462,11 +1463,11 @@ static void BuildStructureTypes(void)
 
     // Parapet segments, authored about the centre of the bay they cap, at roof level.
     Box(&gType[FR_PAR26].b[MAT_CONCRETE], -1.3f - KNIT, 1.3f + KNIT, -KNIT, PARAPET_H, -PARAPET_T, 0.0f);
-    Box(&gType[FR_PAR26].b[MAT_METAL], -1.3f - CORNICE_O, 1.3f + CORNICE_O, PARAPET_H, PARAPET_H + 0.055f, -PARAPET_T - 0.030f, CORNICE_O);
+    Box(&gType[FR_PAR26].b[MAT_METAL], -1.3f - CORNICE_O, 1.3f + CORNICE_O, PARAPET_H, PARAPET_H + 0.036f, -PARAPET_T - 0.030f, CORNICE_O);
     Box(&gType[FR_PAR32].b[MAT_CONCRETE], -1.6f - KNIT, 1.6f + KNIT, -KNIT, PARAPET_H, -PARAPET_T, 0.0f);
-    Box(&gType[FR_PAR32].b[MAT_METAL], -1.6f - CORNICE_O, 1.6f + CORNICE_O, PARAPET_H, PARAPET_H + 0.055f, -PARAPET_T - 0.030f, CORNICE_O);
+    Box(&gType[FR_PAR32].b[MAT_METAL], -1.6f - CORNICE_O, 1.6f + CORNICE_O, PARAPET_H, PARAPET_H + 0.036f, -PARAPET_T - 0.030f, CORNICE_O);
     Box(&gType[FR_PAREND].b[MAT_CONCRETE], -FACE_Z * 0.5f - KNIT, FACE_Z * 0.5f + KNIT, -KNIT, PARAPET_H, -PARAPET_T, 0.0f);
-    Box(&gType[FR_PAREND].b[MAT_METAL], -FACE_Z * 0.5f - CORNICE_O, FACE_Z * 0.5f + CORNICE_O, PARAPET_H, PARAPET_H + 0.055f, -PARAPET_T - 0.030f, CORNICE_O);
+    Box(&gType[FR_PAREND].b[MAT_METAL], -FACE_Z * 0.5f - CORNICE_O, FACE_Z * 0.5f + CORNICE_O, PARAPET_H, PARAPET_H + 0.036f, -PARAPET_T - 0.030f, CORNICE_O);
 
     // A balcony, in the three pieces a balcony on one of these buildings is actually made of. Authored about the facade's outer face at floor level, so it hangs off the panel rather than off a copy of the panel's coordinates.
     //
@@ -1492,13 +1493,13 @@ static void BuildStructureTypes(void)
         Group *g = &gType[FR_BALCSHEET];
         // Standing on the slab rather than flush with its edge, and inset from it, so the concrete the whole balcony hangs off stays visible under and beside the painted sheet. A review round read the enclosed ones as coloured rectangles applied to the wall, and this is why: the sheet reached the slab's own outer face and there was nothing left of the cantilever to see.
         Builder *p = &g->b[MAT_PAINT];
-        Box(p, -hw + 0.035f, hw - 0.035f, 0.030f, rt - 0.045f, BALC_D - 0.110f, BALC_D - 0.075f);
-        Box(p, -hw + 0.035f, -hw + 0.070f, 0.030f, rt - 0.045f, 0.060f, BALC_D - 0.075f);
-        Box(p, hw - 0.070f, hw - 0.035f, 0.030f, rt - 0.045f, 0.060f, BALC_D - 0.075f);
+        Box(p, -hw + 0.060f, hw - 0.060f, 0.030f, rt - 0.045f, BALC_D - 0.215f, BALC_D - 0.180f);
+        Box(p, -hw + 0.060f, -hw + 0.095f, 0.030f, rt - 0.045f, 0.060f, BALC_D - 0.180f);
+        Box(p, hw - 0.095f, hw - 0.060f, 0.030f, rt - 0.045f, 0.060f, BALC_D - 0.180f);
         Builder *m = &g->b[MAT_METAL];
-        Box(m, -hw + 0.015f, hw - 0.015f, rt - 0.045f, rt, BALC_D - 0.135f, BALC_D - 0.050f);
-        Box(m, -hw + 0.015f, -hw + 0.090f, rt - 0.045f, rt, 0.040f, BALC_D - 0.050f);
-        Box(m, hw - 0.090f, hw - 0.015f, rt - 0.045f, rt, 0.040f, BALC_D - 0.050f);
+        Box(m, -hw + 0.040f, hw - 0.040f, rt - 0.045f, rt, BALC_D - 0.240f, BALC_D - 0.155f);
+        Box(m, -hw + 0.040f, -hw + 0.115f, rt - 0.045f, rt, 0.040f, BALC_D - 0.155f);
+        Box(m, hw - 0.115f, hw - 0.040f, rt - 0.045f, rt, 0.040f, BALC_D - 0.155f);
     }
     {
         // The enclosure, glazed in up to the underside of the balcony above. Its frame carries the flat's colour, white on a plastic one and a brown or an ochre on the timber ones ref_05 and ref_07 are full of. The glass has to be a fourth group rather than a fourth material, for the same reason the window pane is its own group and for the same reason the car's glass is not part of its body: a per-instance tint reaches every material in the group it is applied to, so glass left in here would come out brown behind a brown frame.
@@ -1506,20 +1507,21 @@ static void BuildStructureTypes(void)
         Group *q = &gType[FR_BALCPANE];
         float top = STOREY - BALC_T - 0.030f;
         Builder *f = &g->b[MAT_PAINT];
-        float fz1 = BALC_D - 0.055f, fz0 = fz1 - 0.045f;
+        // Set back 0.16 m from the slab's nose, so the concrete lip stays visible under and beside it at every floor. At 0.055 the enclosures of five storeys merged into one tall box and a review round twice read them as coloured rectangles applied to the wall rather than as things standing on a cantilever.
+        float fz1 = BALC_D - 0.160f, fz0 = fz1 - 0.045f;
         Box(f, -hw + 0.015f, hw - 0.015f, rt, rt + 0.045f, fz0, fz1);
         Box(f, -hw + 0.015f, hw - 0.015f, top - 0.045f, top, fz0, fz1);
-        Box(f, -hw + 0.015f, -hw + 0.060f, rt, top, 0.050f, fz1);
-        Box(f, hw - 0.060f, hw - 0.015f, rt, top, 0.050f, fz1);
-        Box(f, -hw + 0.015f, hw - 0.015f, top - 0.045f, top, 0.050f, fz1);
+        Box(f, -hw + 0.040f, -hw + 0.085f, rt, top, 0.050f, fz1);
+        Box(f, hw - 0.085f, hw - 0.040f, rt, top, 0.050f, fz1);
+        Box(f, -hw + 0.040f, hw - 0.040f, top - 0.045f, top, 0.050f, fz1);
         // Six lights across three metres, which is what a resident's glazier fits, and thin enough that the glass is what shows rather than the frame.
         for (int i = 1; i < 6; i++) {
             float x = -hw + BALC_W * (float)i / 6.0f;
             Box(f, x - 0.022f, x + 0.022f, rt, top, fz0, fz1);
         }
         Box(&q->b[MAT_GLASS], -hw + 0.030f, hw - 0.030f, rt + 0.040f, top - 0.045f, fz0 + 0.012f, fz0 + 0.030f);
-        Box(&q->b[MAT_GLASS], -hw + 0.045f, -hw + 0.063f, rt + 0.040f, top - 0.045f, 0.070f, fz0);
-        Box(&q->b[MAT_GLASS], hw - 0.063f, hw - 0.045f, rt + 0.040f, top - 0.045f, 0.070f, fz0);
+        Box(&q->b[MAT_GLASS], -hw + 0.070f, -hw + 0.088f, rt + 0.040f, top - 0.045f, 0.070f, fz0);
+        Box(&q->b[MAT_GLASS], hw - 0.088f, hw - 0.070f, rt + 0.040f, top - 0.045f, 0.070f, fz0);
     }
 
     // The entrance canopy: a slab on two brackets over the door.
@@ -1548,8 +1550,10 @@ static void BuildStructureTypes(void)
     {
         // Rusted through rather than painted, which is what ref_03 and ref_05 both show and the loudest colour on either facade.
         Builder *m = &gType[FR_PIPE].b[MAT_RUST];
-        Tube(m, (Vector3){ 0, -KNIT, 0 }, (Vector3){ 0, STOREY + KNIT, 0 }, 0.058f, 0.058f, 8, false, false);
-        Box(m, -0.080f, 0.080f, 0.180f, 0.260f, -0.100f, 0.010f);
+        Tube(m, (Vector3){ 0, -KNIT, 0 }, (Vector3){ 0, STOREY + KNIT, 0 }, 0.064f, 0.064f, 9, false, false);
+        // The bracket, which is what says the pipe is bolted on rather than cast into the wall, and which has to reach back to the wall from wherever the pipe now stands.
+        Box(m, -0.090f, 0.090f, 0.170f, 0.270f, -0.155f, 0.020f);
+        Box(m, -0.090f, 0.090f, 1.520f, 1.620f, -0.155f, 0.020f);
     }
 
     // The mast every one of these roofs grew in the 1970s.
@@ -2192,8 +2196,8 @@ static void PlaceBuilding(void)
                 float px = -BLOCK_LEN * 0.5f + SECTION_LEN * (float)e;
                 if (e == 0) px += 0.360f;
                 if (e == SECTIONS) px -= 0.360f;
-                Emit(FR_PIPE, px, y, FACE_Z + 0.070f, 0.0f);
-                Emit(FR_PIPE, px, y, -FACE_Z - 0.070f, 180.0f);
+                Emit(FR_PIPE, px, y, FACE_Z + 0.125f, 0.0f);
+                Emit(FR_PIPE, px, y, -FACE_Z - 0.125f, 180.0f);
             }
 
             // The entrance canopy hangs over the back door, one storey up.
@@ -2290,15 +2294,17 @@ static void BuildPlinth(void)
     // Entrance steps, one flight per section, up to the ground floor.
     for (int s = 0; s < SECTIONS; s++) {
         float x = BayX(s, BAY_STAIR);
-        const int RISERS = 5;
-        float rise = PLINTH_Y / (float)RISERS, tread = 0.320f;
+        // Three risers and a shallow landing, not the five-tread flight this had. ref_05's entrance door stands within a step or two of grade with a thin shelf of a canopy over it, and ref_03 and ref_07 are the same; at five treads of 0.32 the flight projected 1.6 m and a review round read the entrances as later elevated annexes stuck onto the courtyard facade.
+        // The ground floor really is PLINTH_Y above grade, which is why there are steps at all: what a khrushchyovka entrance does with the rest of that height is take it inside, on the half flight up to the first landing.
+        const int RISERS = 3;
+        float rise = PLINTH_Y / (float)RISERS, tread = 0.300f;
         for (int i = 0; i < RISERS; i++) {
             float z0 = -hz - t - tread * (float)(RISERS - i);
             Box(&g->b[MAT_CONCRETE], x - 1.100f, x + 1.100f, 0.0f, rise * (float)(i + 1),
                 z0, z0 + tread + 0.001f);
         }
         // Landing in front of the door.
-        Box(&g->b[MAT_CONCRETE], x - 1.100f, x + 1.100f, 0.0f, PLINTH_Y, -hz - t, -hz + 0.200f);
+        Box(&g->b[MAT_CONCRETE], x - 1.100f, x + 1.100f, 0.0f, PLINTH_Y, -hz - t - 0.360f, -hz + 0.200f);
         // A kerb either side of the flight with a handrail over it, rather than the two full-height walls this had first: ref_05 and ref_07 both show a modest step up, not a walled ramp.
         for (int side = 0; side < 2; side++) {
             float cx = (side == 0) ? x - 1.240f : x + 1.100f;
