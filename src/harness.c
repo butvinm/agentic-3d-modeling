@@ -150,6 +150,14 @@ static void WriteDescription(const char *outDir)
     printf("%s\n", path);
 }
 
+// --yaw in degrees, or NAN for the scene's own choice. It exists so an angle can be tried without editing a model, and so SCENE.animYaw stays the angle a review is judged at rather than drifting to whatever framed one sequence nicely.
+static float gYawOverride = NAN;
+
+static float StartYaw(void)
+{
+    return isnan(gYawOverride) ? 45.0f : gYawOverride;
+}
+
 // Two ways to spend the frame budget: turn the camera around a fixed pose, or hold the camera and step the pose through one cycle.
 // The second is the only one that shows whether a joint stays connected while it moves, which a turntable of a single pose cannot answer.
 static int RunShots(const char *outDir, int frames, int width, int height, int ss, bool anim)
@@ -169,10 +177,10 @@ static int RunShots(const char *outDir, int frames, int width, int height, int s
     SceneFraming(&target, &distance, &pitch);
 
     for (int i = 0; i < frames; i++) {
-        float yaw = 45.0f;
+        float yaw = StartYaw();
         if (anim) {
             PoseAt(Duration() * (float)i / (float)frames);
-            if (SCENE.animYaw != 0.0f) yaw = SCENE.animYaw;
+            if (isnan(gYawOverride) && SCENE.animYaw != 0.0f) yaw = SCENE.animYaw;
         }
         else yaw += 360.0f * (float)i / (float)frames;
 
@@ -213,7 +221,7 @@ static void RunInteractive(void)
     SceneFraming(&target, &distance, &pitch);
 
     const float startPitch = pitch, startDistance = distance;
-    float yaw = 45.0f;
+    float yaw = StartYaw();
     bool spinning = true;
 
     while (!WindowShouldClose()) {
@@ -224,7 +232,7 @@ static void RunInteractive(void)
             spinning = false;
         }
         if (IsKeyPressed(KEY_SPACE)) spinning = !spinning;
-        if (IsKeyPressed(KEY_R)) { pitch = startPitch; distance = startDistance; yaw = 45.0f; }
+        if (IsKeyPressed(KEY_R)) { pitch = startPitch; distance = startDistance; yaw = StartYaw(); }
         if (spinning) yaw += 28.0f * GetFrameTime();
 
         float wheel = GetMouseWheelMove();
@@ -244,10 +252,11 @@ static void RunInteractive(void)
 
 static void Usage(const char *argv0)
 {
-    printf("usage: %s [--shots DIR] [--anim] [--frames N] [--size WxH] [--supersample N] [--part NAME]\n", argv0);
+    printf("usage: %s [--shots DIR] [--anim] [--frames N] [--size WxH] [--supersample N] [--part NAME] [--yaw DEG]\n", argv0);
     printf("  no args        open an interactive orbit-camera window\n");
     printf("  --shots        render N turntable views to DIR as PNG and exit\n");
     printf("  --anim         with --shots, hold the camera and step the pose through one cycle instead\n");
+    printf("  --yaw DEG      camera yaw: the angle --anim holds, or the one a turntable starts from\n");
     printf("  --part NAME    render only that part, framed to its own bounds\n");
     printf("  --list-parts   print this scene's part names and exit\n");
 }
@@ -276,6 +285,7 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--part") == 0 && i + 1 < argc) partName = argv[++i];
         else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) frames = atoi(argv[++i]);
         else if (strcmp(argv[i], "--supersample") == 0 && i + 1 < argc) ss = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--yaw") == 0 && i + 1 < argc) gYawOverride = (float)atof(argv[++i]);
         else if (strcmp(argv[i], "--list-parts") == 0) {
             for (int p = 0; p < SCENE.partCount; p++) printf("%s\n", SCENE.parts[p].name);
             return 0;
