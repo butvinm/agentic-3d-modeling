@@ -2,12 +2,10 @@
 
 Raylib 3D models and animations, written by Claude Code and reviewed by Codex.
 
-|                                                                   |
-| :---------------------------------------------------------------: |
-|                 AK-47 firing a three-round burst                  |
-|    ![AK-47 firing a three-round burst](assets/ak47_anim.webp)     |
-|                HMMWV driving over a periodic road                 |
-| ![HMMWV driving over a periodic road](assets/humvee_v3_anim.webp) |
+|                                           Examples                                           |
+| :------------------------------------------------------------------------------------------: |
+|  ![AK-47 firing a three-round burst](assets/ak47.webp) **AK-47 firing a three-round burst**  |
+| ![HMMWV under way on a rough track](assets/humvee.webp) **HMMWV under way on a rough track** |
 
 ## Usage
 
@@ -21,5 +19,5 @@ Raylib 3D models and animations, written by Claude Code and reviewed by Codex.
 
 ```sh
 ./build/ak47 --shots renders/ak47/v1 --frames 8 --size 1600x1200 --supersample 3
-./build/crank_slider --shots renders/crank_slider/v1 --anim --frames 8
+./build/humvee --shots renders/humvee/v1 --anim --frames 25
 ```
