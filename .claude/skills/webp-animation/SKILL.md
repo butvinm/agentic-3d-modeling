@@ -29,13 +29,13 @@ Three constraints, all of which have bitten:
 
 **N must divide the total playback into whole milliseconds.** WebP stores per-frame delays as integer ms. A 1.25 s cycle over 60 frames wants 20.83 ms and silently rounds, drifting off the speed you intended; 50 frames at 25 ms is exact.
 
-**N must land a frame on every brief event.** `--anim` samples N evenly spaced phases, so an event shorter than one interval is caught only by luck. `models/ak47_anim.c` puts its three ignitions on fifths of the cycle, so any multiple of 5 catches all three and `--frames 8` catches only the first. Read the model's own note about where it put its events before picking.
+**N must land a frame on every brief event.** `--anim` samples N evenly spaced phases, so an event shorter than one interval is caught only by luck. `models/ak47.c` puts its three ignitions on fifths of the cycle, so any multiple of 5 catches all three and `--frames 8` catches only the first. Read the model's own note about where it put its events before picking.
 
-**N must be fine enough to resolve the event.** `models/humvee_v3_anim.c` has a 0.19 s jump in a 4 s loop, so fewer than about 21 frames steps over it entirely.
+**N must be fine enough to resolve the event.** `models/humvee.c` has a 0.19 s jump in a 4 s loop, so fewer than about 21 frames steps over it entirely.
 
 ## Playback speed
 
-The honest total is the model's cycle in **real** seconds. Some models scale playback with their own constant: `models/ak47_anim.c` has `SLOWDOWN`, and `CYCLE` is `TOTAL_T * SLOWDOWN`. Others derive everything from the cycle instead: `models/humvee_v3_anim.c` computes `SPEED` from `CYCLE`, so its 4 s is already real time. Read which before claiming a speed.
+The honest total is the model's cycle in **real** seconds. Some models scale playback with their own constant: `models/ak47.c` has `SLOWDOWN`, and `CYCLE` is `TOTAL_T * SLOWDOWN`. Others derive everything from the cycle instead: `models/humvee.c` computes `SPEED` from `CYCLE`, so its 4 s is already real time. Read which before claiming a speed.
 
 The README loops are deliberately **2x slower than real** so they can be followed. That is a presentation choice, not what the model does, and it means the README no longer matches the interactive window. Say so rather than letting a reader assume real time.
 

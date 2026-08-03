@@ -26,15 +26,15 @@ make clean-raylib                    # force a full raylib rebuild
 
 ./build/humvee                       # interactive window: drag to orbit, wheel zooms, space toggles spin, R resets
 ./build/humvee --list-parts          # print this model's part names
-./build/humvee --part wheels         # inspect one part, framed to its own bounds
+./build/humvee --part running_gear   # inspect one part, framed to its own bounds
 ./build/humvee --shots out --frames 6 --size 1600x1200 --supersample 3
-./build/crank_slider --shots out --anim --frames 8   # step the pose instead of orbiting the camera
+./build/humvee --shots out --anim --frames 25        # step the pose instead of orbiting the camera
 ./build/humvee --shots out --yaw 140                 # choose the camera angle without editing the model
 
 ./tools/review.sh humvee             # build, render into the next renders/humvee/vN/, critique with Codex
-PART=wheels ./tools/review.sh humvee
+PART=running_gear ./tools/review.sh humvee
 FRAMES=8 ./tools/review.sh humvee "pay attention to the wheel arches"
-ANIM=1 ./tools/review.sh crank_slider
+ANIM=1 ./tools/review.sh humvee
 ```
 
 `--shots` renders N evenly spaced turntable views and exits, printing each written path. Without it the binary opens a window.

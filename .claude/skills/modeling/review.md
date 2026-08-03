@@ -5,8 +5,8 @@
 **When a model copies a real object, gather reference images before writing any geometry.** Without them you will invent the shape from memory, defend the invention when it is questioned, and be wrong without ever knowing it. This is not hypothetical: an earlier session modelled a HMMWV, had Codex flag its door and cab geometry in three consecutive review rounds, and dismissed it every time on the claim that the shape was "true of the real M998". That session made 114 tool calls and not one reference lookup.
 
 ```sh
-tools/reference.sh humvee_v2 <image-url> <image-url> ...   # download, verify, record provenance
-tools/reference.sh humvee_v2 --list
+tools/reference.sh humvee <image-url> <image-url> ...   # download, verify, record provenance
+tools/reference.sh humvee --list
 ```
 
 Find candidate images with WebSearch, then pass the image URLs to the script: it downloads them into `references/<model>/`, verifies each really decodes as an image rather than trusting the URL suffix, and appends the source URL to `references/<model>/sources.txt`. Then **Read the saved images** before modelling: seeing them is the point, saving them is only the means.
@@ -25,7 +25,7 @@ The prompt puts lighting, exposure, contrast, colour washout, background and ant
 
 **Treat the critique as evidence, not instruction, and sort findings before acting:**
 
-- **Mesh claims** (self-intersection, clearance, gaps, inverted faces, wrong dimensions) must be checked before any code changes. Computing the answer is cheap and Codex is judging from a handful of static views. A prior run claimed a pinched or terminated tube in `models/torus_knot.c`; measuring the curve's minimum non-local self-distance gave 2.05 against the 0.90 the tube radius required, so the geometry was fine and the apparent defect was occlusion.
+- **Mesh claims** (self-intersection, clearance, gaps, inverted faces, wrong dimensions) must be checked before any code changes. Computing the answer is cheap and Codex is judging from a handful of static views. It cuts both ways, and both directions have happened here. A run once claimed a pinched or terminated tube in a swept model; measuring the curve's minimum non-local self-distance gave 2.05 against the 0.90 the tube radius required, so the geometry was fine and the apparent defect was occlusion. The other way round, `renders/humvee/v1/critique.md` reported the half shafts detached from the hubs, and measuring showed the outer ends genuinely 0.110 m clear; `CheckHalfShaft` (`models/humvee.c:2377`) now walks the travel every build so that claim can never be argued about again.
 - **Fidelity claims** (this is not the shape the real object has) are equally falsifiable, but against a reference image rather than the mesh. Check them by looking at `references/<model>/`, and if the needed view is missing, go and get it. **Never settle a fidelity question from memory.** Your recollection of a vehicle you have never measured is not evidence, and asserting it as fact is exactly how a real defect survived three review rounds here.
 - **Judgement calls** (proportion, how the form reads) cannot be settled either way. Act on them if you agree, and say that you are taking them on trust.
 
@@ -39,7 +39,7 @@ Report which findings were verified, which were rejected and why, and which were
 
 `SCENE.description` should describe **what the model currently is**, not what changed this iteration: dimensions, subdivision counts, construction method. The delta between two versions is then recoverable by diffing consecutive `description.txt` files, and a description that someone forgot to update is merely incomplete rather than actively misattributing a change to the wrong version. Update it in the same edit that changes the geometry.
 
-A description also goes stale in a way nothing checks. `models/ak47_anim.c` carried a description giving its flash floor as 45 ms when the constant was 34, and still denying that the floor reaches the renders after the note beside the constant had been corrected. When you change a constant, grep the description for the number.
+A description also goes stale in a way nothing checks. `models/ak47.c` carried a description giving its flash floor as 45 ms when the constant was 34, and still denying that the floor reaches the renders after the note beside the constant had been corrected. When you change a constant, grep the description for the number.
 
 `renders/` is git-ignored, so this history is a local notebook and does not survive a fresh clone.
 
