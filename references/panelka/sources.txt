@@ -1,0 +1,9 @@
+ref_01.png	https://upload.wikimedia.org/wikipedia/commons/0/02/%D0%9F%D0%BB%D0%B0%D0%BD_%D1%81%D0%B5%D0%BA%D1%86%D0%B8%D0%B8_1-464.png
+ref_02.jpg	https://upload.wikimedia.org/wikipedia/commons/e/ed/%D0%9A%D0%B0%D0%B7%D0%B0%D0%BD%D1%8C._%D0%9F%D1%8F%D1%82%D0%B8%D1%8D%D1%82%D0%B0%D0%B6%D0%BD%D0%B0%D1%8F_%D1%85%D1%80%D1%83%D1%89%D1%91%D0%B2%D0%BA%D0%B0_%D1%81%D0%B5%D1%80%D0%B8%D0%B8_1-464_%D0%B2_%D0%BC%D0%B8%D0%BA%D1%80%D0%BE%D1%80%D0%B0%D0%B9%D0%BE%D0%BD%D0%B5_%D0%A2%D0%B0%D0%BD%D0%BA%D0%BE%D0%B4%D1%80%D0%BE%D0%BC.JPG
+ref_03.jpg	https://upload.wikimedia.org/wikipedia/commons/8/8b/%D0%9A%D0%B0%D0%B7%D0%B0%D0%BD%D1%8C._%D0%9F%D1%8F%D1%82%D0%B8%D1%8D%D1%82%D0%B0%D0%B6%D0%BD%D1%8B%D0%B5_%D1%85%D1%80%D1%83%D1%89%D1%91%D0%B2%D0%BA%D0%B8_%D1%81%D0%B5%D1%80%D0%B8%D0%B8_1-464_%D0%BD%D0%B0_%D1%83%D0%BB%D0%B8%D1%86%D0%B5_%D0%A0%D0%B8%D1%85%D0%B0%D1%80%D0%B4%D0%B0_%D0%97%D0%BE%D1%80%D0%B3%D0%B5.JPG
+ref_04.jpg	https://upload.wikimedia.org/wikipedia/commons/f/fa/%D0%9A%D0%B0%D0%B7%D0%B0%D0%BD%D1%8C._%D0%A3%D0%BB%D0%B8%D1%86%D0%B0_%D0%92%D0%BE%D0%BB%D0%B3%D0%BE%D0%B3%D1%80%D0%B0%D0%B4%D1%81%D0%BA%D0%B0%D1%8F%2C_27._%D0%9E%D1%84%D0%BE%D1%80%D0%BC%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5_%D1%82%D0%BE%D1%80%D1%86%D0%B5%D0%B2%D0%BE%D0%B9_%D1%81%D1%82%D0%B5%D0%BD%D1%8B_%D0%B4%D0%BE%D0%BC%D0%B0.JPG
+ref_05.jpg	https://upload.wikimedia.org/wikipedia/commons/1/11/%D0%93%D0%B0%D1%82%D1%87%D0%B8%D0%BD%D0%B0._%D0%A3%D0%BB%D0%B8%D1%86%D0%B0_%D0%92%D0%BE%D0%BB%D0%BE%D0%B4%D0%B0%D1%80%D1%81%D0%BA%D0%BE%D0%B3%D0%BE%2C_28.jpg
+ref_06.jpg	https://upload.wikimedia.org/wikipedia/commons/0/0c/Khrushchev_house%2C_Novosibirsk_01.jpg
+ref_07.jpg	https://upload.wikimedia.org/wikipedia/commons/8/8a/Panel_Khrushchev_house_in_Tomsk.jpg
+ref_08.jpg	https://upload.wikimedia.org/wikipedia/commons/e/ef/Lada_1200L_in_Kerava%2C_Finland_%28side_view%29.jpg
+ref_09.jpg	https://upload.wikimedia.org/wikipedia/commons/1/1e/Lada_1200L_in_Kerava%2C_Finland_%28right-front_view%29.jpg
