@@ -45,6 +45,8 @@ ANIM=1 ./tools/review.sh humvee
 
 `[` and `]` step the window's playback speed down and up by 0.1, from 0.1x to 4.0x, and both auto-repeat when held. `P` pauses the pose where it is; the speed's bottom stop is 0.1x rather than zero, so stopping stays something you ask for explicitly. They belong to the window and change nothing that is rendered: `--anim` samples N evenly spaced phases of `SCENE.duration` regardless, so the same frames come out at any speed. The HUD shows the current speed and where the pose is in its cycle. A scene with no `update` gets neither the keys nor that line, since it has no pose to slow down.
 
+The window opens at `SCENE.previewSpeed`, which `R` also returns to, and both models set it to 0.6 because both run too quickly to follow at real time. **Slowing a preview is what that field is for, and scaling `SCENE.duration` is not the way to do it**: `models/humvee.c:1771` derives the truck's road speed from `CYCLE`, so a longer cycle there is a truck driving slower, and it changes every rendered frame with it.
+
 After a fresh clone: `git submodule update --init` then `make`.
 
 ## Renders belong to the working tree, never to a scratchpad

@@ -2202,6 +2202,8 @@ const Scene SCENE = {
     .update = Update,
     .duration = CYCLE,
     .animYaw = 20.0f,
+    // The window opens at 0.6, and nothing about the rifle is 0.6. A three-round burst at 600 rpm really is over in 0.3 s, and three flashes 100 ms apart are at the limit of what an eye can count, so the window opened on a motion nobody could follow and the honesty of that was worth less than being able to see it. duration stays the real 0.5 s and rendered frames are untouched; press ] four times for real time.
+    .previewSpeed = 0.6f,
     .parts = PARTS,
     .partCount = (int)(sizeof(PARTS) / sizeof(PARTS[0])),
     .target = { 0.0f, 1.30f, 0.0f },

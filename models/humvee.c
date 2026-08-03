@@ -2709,6 +2709,8 @@ const Scene SCENE = {
     .update = Update,
     .duration = CYCLE,
     .animYaw = 40.0f,
+    // Slowed in the window only. CYCLE cannot be the lever here: SPEED is derived from it, so a longer cycle is a truck driving slower rather than a playback running slower, and it would change every rendered frame with it.
+    .previewSpeed = 0.6f,
     .parts = PARTS,
     .partCount = COUNT_OF(PARTS),
     .target = { 0.0f, 0.90f, 0.0f },
