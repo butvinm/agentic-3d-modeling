@@ -792,14 +792,14 @@ static const float BAY_W[BAYS] = { 2.6f, 3.2f, 2.6f, 2.6f, 2.6f, 3.2f, 2.6f };
 #define FACE_Z        (HALF_D + WALL_T * 0.5f)   // 5.91, outer face of the facade
 #define INNER_Z       (HALF_D - WALL_T * 0.5f)   // 5.61, inner face
 
-#define JOINT         0.030f   // half the groove between two panels: each face plate insets by this
+#define JOINT         0.045f   // half the groove between two panels: each face plate insets by this
 // How far every piece is grown past its own edge so that it knits into its neighbour instead of
 // meeting it on an exactly coincident plane. Two coplanar back-to-back faces are the one thing
 // this file draws hundreds of, and left touching they speckle along every joint: the rasterizer
 // picks between them per pixel and the facade comes out ruled with dashed lines. It is also the
 // honest construction, since a real panel is butted and caulked rather than laid edge to edge.
 #define KNIT          0.006f
-#define FACE_T        0.040f   // how far the face plate stands proud of the panel core
+#define FACE_T        0.060f   // how far the face plate stands proud of the panel core
 #define CORE_T        (WALL_T - FACE_T)
 
 #define ROOF_Y        (PLINTH_Y + FLOORS * STOREY)      // 14.25, top of the fifth-floor ceiling
@@ -815,7 +815,7 @@ static const float BAY_W[BAYS] = { 2.6f, 3.2f, 2.6f, 2.6f, 2.6f, 3.2f, 2.6f };
 #define WIN_W26       1.300f
 #define WIN_W32       1.500f
 #define BDOOR_W       0.750f
-#define BDOOR_SILL    0.100f
+#define BDOOR_SILL    0.150f
 #define BDOOR_H       2.100f
 // A stairwell landing is half a flight above the floor its panel stands on, so its window cannot share the apartments' rhythm.
 // One-storey panels cannot carry a light that straddles the slab, so consecutive storeys alternate between a low sill and a high one, which is the zigzag the real rhythm reads as from outside.
@@ -1843,48 +1843,100 @@ static void BuildGround(void)
 #define SEQ_LEN      0.42f    // the firing sequence takes this long to run the length of the block
 #define FRONT_V      11.0f    // speed the crushing front climbs the building, m/s
 #define GRAV         9.81f
+#define CRUSH_LOSS   0.62f    // how much of a storey's height is gone once it has been crushed
 #define CUT_TOP      (PLINTH_Y + 2.0f * STOREY)   // charges are in the two storeys below this
 #define BULK_FACTOR  1.55f    // how much a cubic metre of concrete swells once it is rubble
-#define PILE_SPREAD  9.0f     // how far past the footprint the pile runs out to nothing
+#define PILE_SPREAD  9.0f     // how far past the footprint the debris skirt is expected to run
 #define BLAST_V      105.0f   // speed of the air blast that reaches the yard, m/s
-
-static float gPileH = 2.0f;   // solved in SolvePile
 
 static bool IsBuilding(FragType t) { return t < FR_RUBBLE; }
 
-// The rubble pile: a ridge over the footprint running out to nothing PILE_SPREAD past it, highest
-// along the spine and falling towards the gables where there was less above to come down.
-static float PileY(float x, float z)
-{
-    float dx = fmaxf(0.0f, fabsf(x) - BLOCK_LEN * 0.5f);
-    float dz = fmaxf(0.0f, fabsf(z) - FACE_Z);
-    float d = sqrtf(dx * dx + dz * dz);
-    float k = 1.0f - d / PILE_SPREAD;
-    if (k <= 0.0f) return 0.0f;
-    k = k * k * (3.0f - 2.0f * k);
+// The pile is a heightfield, not a formula. Fragments are planned in the order they land and each
+// is put on top of whatever is already in the cells its own footprint covers, so the pile is
+// something the debris builds rather than a surface it is snapped to.
+//
+// A review round called the first version's most damaging defect: with every fragment solved
+// independently against one analytic mound, the finished pile was a heap of intersecting cards,
+// panels crossing slabs at incompatible angles in the same volume. This does not make it a
+// solver -- nothing here resolves a collision, and a fragment still flies through whatever is in
+// its way -- but it does mean that where a piece comes to rest is decided by what is already
+// there.
+#define PILE_CELL  1.0f
+#define PILE_MARGIN 21.0f
+// Literal, because a cast of a float expression is not an integer constant expression and a
+// variably modified array at file scope is not a thing. CheckPileGrid proves they still cover.
+#define PILE_NX    104
+#define PILE_NZ    56
+static float gHeight[PILE_NX][PILE_NZ];
 
-    float ax = fminf(1.0f, fabsf(x) / (BLOCK_LEN * 0.5f));
-    float along = 1.0f - 0.34f * ax * ax * ax;
-    float az = fminf(1.0f, fabsf(z) / FACE_Z);
-    float across = 1.0f - 0.30f * az * az;
-    return gPileH * k * along * across;
+static void PileCell(float x, float z, int *ix, int *iz)
+{
+    *ix = (int)Clamp((x + BLOCK_LEN * 0.5f + PILE_MARGIN) / PILE_CELL, 0.0f, (float)(PILE_NX - 1));
+    *iz = (int)Clamp((z + FACE_Z + PILE_MARGIN) / PILE_CELL, 0.0f, (float)(PILE_NZ - 1));
 }
 
-// How high the pile has to stand for its shape to hold the material that fell into it.
-// Integrate PileY at unit height over the whole spill region, then scale by the volume.
-static void SolvePile(float material)
+// The highest thing already under a footprint, which is what a piece landing on it rests on.
+static float PileUnder(float x, float z, float hx, float hz)
 {
-    gPileH = 1.0f;
-    const float STEP = 0.5f;
-    float area = 0.0f;
-    for (float x = -BLOCK_LEN * 0.5f - PILE_SPREAD; x < BLOCK_LEN * 0.5f + PILE_SPREAD; x += STEP) {
-        for (float z = -FACE_Z - PILE_SPREAD; z < FACE_Z + PILE_SPREAD; z += STEP) {
-            area += PileY(x + STEP * 0.5f, z + STEP * 0.5f) * STEP * STEP;
-        }
+    int x0, z0, x1, z1;
+    PileCell(x - hx, z - hz, &x0, &z0);
+    PileCell(x + hx, z + hz, &x1, &z1);
+    float top = 0.0f;
+    for (int i = x0; i <= x1; i++) {
+        for (int j = z0; j <= z1; j++) top = fmaxf(top, gHeight[i][j]);
     }
-    gPileH = (area > 1e-3f) ? material * BULK_FACTOR / area : 2.0f;
-    TraceLog(LOG_INFO, "panelka: %.0f m3 of material bulks to %.0f and piles %.2f m deep at the crest",
-             material, material * BULK_FACTOR, gPileH);
+    return top;
+}
+
+// What a fragment adds to the pile is its own material, spread over its own footprint, and
+// nothing else. Raising every covered cell to the piece's own top instead was the first attempt
+// and it ran away to 18 m: a panel resting flat covers about 28 m2 and is 0.3 thick, so raising
+// all of that by 0.3 credits it with four times the concrete it contains, and the max-then-set
+// carried the tallest stack outwards across the site. Depositing volume conserves it exactly --
+// the sum over every cell is the bulked material, by construction -- while PileUnder still
+// returns the highest thing under a footprint, so a piece still comes to rest on what is there.
+static void PileDeposit(float x, float z, float hx, float hz, float volume)
+{
+    int x0, z0, x1, z1;
+    PileCell(x - hx, z - hz, &x0, &z0);
+    PileCell(x + hx, z + hz, &x1, &z1);
+    int cells = (x1 - x0 + 1) * (z1 - z0 + 1);
+    if (cells <= 0) return;
+    float dep = volume * BULK_FACTOR / ((float)cells * PILE_CELL * PILE_CELL);
+    for (int i = x0; i <= x1; i++) {
+        for (int j = z0; j <= z1; j++) gHeight[i][j] += dep;
+    }
+}
+
+// The grid's dimensions are literals, so prove they still reach past everything that lands.
+static void CheckPileGrid(void)
+{
+    float needX = BLOCK_LEN + 2.0f * PILE_MARGIN, needZ = 2.0f * FACE_Z + 2.0f * PILE_MARGIN;
+    if (needX > (float)PILE_NX * PILE_CELL || needZ > (float)PILE_NZ * PILE_CELL) {
+        TraceLog(LOG_ERROR, "panelka: the pile grid is %dx%d cells but needs %.0fx%.0f",
+                 PILE_NX, PILE_NZ, needX, needZ);
+    }
+}
+
+static float PileCrest(void)
+{
+    float top = 0.0f;
+    for (int i = 0; i < PILE_NX; i++) {
+        for (int j = 0; j < PILE_NZ; j++) top = fmaxf(top, gHeight[i][j]);
+    }
+    return top;
+}
+
+// What a pile of this much material ought to crest at, independently of where the fragments
+// actually end up. Volume by the divergence theorem, bulked for what a solid becomes once it is
+// broken, spread over the footprint plus the skirt it runs out onto. It is a check on the packed
+// pile rather than the pile itself: the two coming out close is evidence that the packing is
+// putting the material somewhere sensible, and CheckCollapse prints both.
+static float PredictedCrest(float material)
+{
+    float area = (BLOCK_LEN + PILE_SPREAD) * (2.0f * FACE_Z + PILE_SPREAD);
+    // A mound of this footprint holds about half of what a prism of its crest height would.
+    return material * BULK_FACTOR / (area * 0.5f);
 }
 
 typedef struct {
@@ -1894,10 +1946,28 @@ typedef struct {
     Vector3 axis;    // tumble axis, in the fragment's own frame
     float omega;
     Vector3 c;       // local centroid, which is what it tumbles about
-    float half;      // half its own height, so it comes to rest on the pile rather than through it
+    Vector3 rest;    // world position of that centroid at the moment it lets go
+    float seq;       // where this fragment sits in the firing sequence
+    float drop;      // how far the crush below had already carried it down by then
+    float half;      // half its vertical extent *at the orientation it lands in*, not upright
 } Motion;
 
 static Motion gMotion[MAX_FRAG];
+
+// How far the material above the crush front has already been carried down by the time t. The
+// front leaves the cut when the charges under that part of the block fire and climbs at FRONT_V,
+// and everything above it rides down on what is being destroyed underneath.
+//
+// Without this a fragment simply waits in place until the front reaches it, and a review round
+// read exactly that: the roof sitting level over a frame the facade had come off, as though the
+// skin had been blown away rather than the building losing its footing. A panelka's upper mass
+// starts down as soon as the bottom of it stops holding, which is what this is.
+static float CrushDrop(float seq, float y, float t)
+{
+    float front = CUT_TOP + FRONT_V * fmaxf(0.0f, t - T_BLAST - seq);
+    front = fminf(front, y);
+    return fmaxf(0.0f, front - CUT_TOP) * CRUSH_LOSS;
+}
 
 static float Rand01(int i, int k) { return Hash2(i, k, 4096, 977u); }
 static float Rand11(int i, int k) { return Rand01(i, k) * 2.0f - 1.0f; }
@@ -1941,7 +2011,13 @@ static void PlanFragment(int i)
         m->t0 -= 0.22f;
         out = 1.1f + 0.10f * height + 0.8f * Rand01(i, 9);
     } else if (skin) {
-        out = 0.35f + 0.105f * height + 0.7f * Rand01(i, 10);
+        // A review round read the first pass as the facade being explosively blown off while the
+        // roof stayed level over it. What actually happens is that the lower storeys lose support
+        // and the mass above starts down before anything peels, so the skin now waits a fifth of
+        // a second longer than the structure at its own height and leaves with a third of the
+        // outward speed it had. The peel then comes from the tumble and the fall rather than a kick.
+        m->t0 += 0.20f;
+        out = 0.25f + 0.038f * height + 0.45f * Rand01(i, 10);
     } else if (f->type == FR_RUBBLE) {
         m->t0 = T_BLAST + seq + climb * 0.75f + 0.35f * Rand01(i, 18);
         out = 1.3f + 3.4f * Rand01(i, 19);
@@ -1959,18 +2035,14 @@ static void PlanFragment(int i)
     if (f->type == FR_RUBBLE) m->omega *= 4.0f;
 
     m->t0 = fmaxf(m->t0, T_BLAST + seq);
-
-    // Where it comes down. The landing point depends on the flight time and the flight time on the
-    // landing point, so solve it twice; two passes move the answer by centimetres on the third.
-    float tau = 0.6f;
-    for (int pass = 0; pass < 3; pass++) {
-        float lx = wc.x + m->v0.x * tau;
-        float lz = wc.z + m->v0.z * tau;
-        float target = PileY(lx, lz) + m->half;
-        float disc = m->v0.y * m->v0.y + 2.0f * GRAV * (wc.y - target);
-        tau = (disc <= 0.0f) ? 0.0f : (m->v0.y + sqrtf(disc)) / GRAV;
-    }
-    m->t1 = m->t0 + tau;
+    m->seq = seq;
+    m->drop = CrushDrop(seq, wc.y, m->t0);
+    m->rest = wc;
+    m->rest.y -= m->drop;
+    // A provisional flight time against bare ground, which is only used to put the fragments into
+    // the order they land in. SolveLanding then walks that order and does the real one.
+    float disc = m->v0.y * m->v0.y + 2.0f * GRAV * fmaxf(0.0f, wc.y - m->half);
+    m->t1 = m->t0 + ((disc <= 0.0f) ? 0.0f : (m->v0.y + sqrtf(disc)) / GRAV);
 }
 
 
@@ -2029,7 +2101,7 @@ static void AddPuff(Vector3 p, Vector3 v, float t0, float life, float r0, float 
 
 static void PlaceDust(void)
 {
-    const int SURGE = 620, COLUMN = 380;
+    const int SURGE = 620, COLUMN = 260;
 
     for (int i = 0; i < SURGE; i++) {
         // Born on the footprint's perimeter, as the firing sequence reaches that x.
@@ -2045,9 +2117,9 @@ static void PlaceDust(void)
         float speed = 9.0f + 13.0f * Hash2(i, 6, 4096, 97u);
         Vector3 v = { (Hash2(i, 7, 4096, 101u) - 0.5f) * 7.0f, 0.8f + 2.2f * Hash2(i, 8, 4096, 103u), sz * speed };
         float r0 = 2.0f + 2.4f * Hash2(i, 9, 4096, 107u);
-        AddPuff((Vector3){ x, y, z }, v, t0, 2.6f + 1.9f * Hash2(i, 10, 4096, 109u),
-                r0, r0 * (3.4f + 2.0f * Hash2(i, 11, 4096, 113u)),
-                0.16f + 0.11f * Hash2(i, 12, 4096, 127u), 0.55f, i);
+        AddPuff((Vector3){ x, y, z }, v, t0, 2.2f + 1.7f * Hash2(i, 10, 4096, 109u),
+                r0, r0 * (2.9f + 1.6f * Hash2(i, 11, 4096, 113u)),
+                0.15f + 0.10f * Hash2(i, 12, 4096, 127u), 0.25f + 0.55f * Hash2(i, 13, 4096, 131u), i);
     }
 
     for (int i = 0; i < COLUMN; i++) {
@@ -2063,9 +2135,12 @@ static void PlaceDust(void)
                       3.4f + 5.2f * Hash2(i, 26, 4096, 157u),
                       (Hash2(i, 27, 4096, 163u) - 0.5f) * 5.0f };
         float r0 = 2.8f + 3.2f * Hash2(i, 28, 4096, 167u);
-        AddPuff((Vector3){ x, y, z }, v, t0, 2.4f + 1.6f * Hash2(i, 29, 4096, 173u),
-                r0, r0 * (2.6f + 1.6f * Hash2(i, 30, 4096, 179u)),
-                0.12f + 0.10f * Hash2(i, 31, 4096, 181u), 1.15f, i + SURGE);
+        // A review round found the cloud reading as one level blanket over the whole courtyard,
+        // hiding the pile from the only camera the loop has. The column is fewer, smaller and
+        // fainter for it, and each puff now gets its own buoyancy so their tops do not line up.
+        AddPuff((Vector3){ x, y, z }, v, t0, 2.2f + 1.5f * Hash2(i, 29, 4096, 173u),
+                r0, r0 * (2.0f + 1.2f * Hash2(i, 30, 4096, 179u)),
+                0.085f + 0.070f * Hash2(i, 31, 4096, 181u), 0.7f + 1.7f * Hash2(i, 32, 4096, 191u), i + SURGE);
     }
 
     for (int i = 0; i < 190; i++) {
@@ -2151,12 +2226,11 @@ static void PoseDust(float t)
 
 #define CYCLE 6.0f
 
-// A fragment in flight: ballistic about its own centroid, frozen the moment it lands.
-static Matrix FlightPose(int i, float t)
+// A fragment tau seconds into its flight: ballistic about its own centroid.
+static Matrix PoseAtTau(int i, float tau)
 {
     const Fragment *f = &gFrag[i];
     const Motion *m = &gMotion[i];
-    float tau = fminf(t, m->t1) - m->t0;
     if (tau <= 0.0f) return FragRest(f);
 
     Vector3 d = { m->v0.x * tau, m->v0.y * tau - 0.5f * GRAV * tau * tau, m->v0.z * tau };
@@ -2170,7 +2244,76 @@ static Matrix FlightPose(int i, float t)
     M = MatrixMultiply(M, MatrixRotate(m->axis, m->omega * tau));
     M = MatrixMultiply(M, MatrixTranslate(sc.x, sc.y, sc.z));
     M = MatrixMultiply(M, MatrixRotateY(f->yaw * DEG2RAD));
-    return MatrixMultiply(M, MatrixTranslate(f->pos.x + d.x, f->pos.y + d.y, f->pos.z + d.z));
+    return MatrixMultiply(M, MatrixTranslate(f->pos.x + d.x, f->pos.y + d.y - m->drop, f->pos.z + d.z));
+}
+
+// Frozen the moment it lands.
+static Matrix FlightPose(int i, float t)
+{
+    return PoseAtTau(i, fminf(t, gMotion[i].t1) - gMotion[i].t0);
+}
+
+// How far a fragment reaches in each axis at a given moment of its tumble. The linear part of the
+// pose maps the local box's half-extents, so the support function of the transformed box is the
+// sum of the absolute contributions -- which is the whole of Codex's second finding: m->half was
+// the *upright* half-height, and a 2.66 m panel that comes down edge-on has a vertical extent of
+// 0.15, so it was left floating 1.3 m over the pile. A slab that lands on edge was buried by the
+// same amount in the other direction.
+static Vector3 ExtentAt(int i, float tau)
+{
+    Matrix M = PoseAtTau(i, tau);
+    BoundingBox b = gType[gFrag[i].type].bounds;
+    float hx = (b.max.x - b.min.x) * 0.5f;
+    float hy = (b.max.y - b.min.y) * 0.5f;
+    float hz = (b.max.z - b.min.z) * 0.5f;
+    return (Vector3){
+        fabsf(M.m0) * hx + fabsf(M.m4) * hy + fabsf(M.m8) * hz,
+        fabsf(M.m1) * hx + fabsf(M.m5) * hy + fabsf(M.m9) * hz,
+        fabsf(M.m2) * hx + fabsf(M.m6) * hy + fabsf(M.m10) * hz,
+    };
+}
+
+// Walk the fragments in the order they land and put each one on top of what is already there.
+// Both the landing point and the fragment's own extent depend on the flight time, and the flight
+// time on both of them, so each is solved by four passes of the same substitution; the fourth
+// moves the answer by millimetres.
+static int gLandOrder[MAX_FRAG];
+
+static void SolveLanding(void)
+{
+    int n = 0;
+    for (int i = 0; i < gFragCount; i++) {
+        if (IsBuilding(gFrag[i].type) || gFrag[i].type == FR_RUBBLE) gLandOrder[n++] = i;
+    }
+    for (int a = 1; a < n; a++) {
+        int v = gLandOrder[a], b = a - 1;
+        while (b >= 0 && gMotion[gLandOrder[b]].t1 > gMotion[v].t1) { gLandOrder[b + 1] = gLandOrder[b]; b--; }
+        gLandOrder[b + 1] = v;
+    }
+
+    for (int k = 0; k < n; k++) {
+        int i = gLandOrder[k];
+        Motion *m = &gMotion[i];
+        float tau = m->t1 - m->t0;
+        Vector3 e = { 1.0f, m->half, 1.0f };
+        Vector3 wc = m->rest;
+
+        for (int pass = 0; pass < 4; pass++) {
+            e = ExtentAt(i, tau);
+            wc = Vector3Transform(m->c, PoseAtTau(i, tau));
+            float surface = PileUnder(wc.x, wc.z, e.x, e.z);
+            float target = surface + e.y;
+            float disc = m->v0.y * m->v0.y + 2.0f * GRAV * (m->rest.y - target);
+            tau = (disc <= 0.0f) ? 0.0f : (m->v0.y + sqrtf(disc)) / GRAV;
+        }
+
+        m->half = e.y;
+        m->t1 = m->t0 + tau;
+        wc = Vector3Transform(m->c, PoseAtTau(i, tau));
+        e = ExtentAt(i, tau);
+        float sc = gFrag[i].scale;
+        PileDeposit(wc.x, wc.z, e.x, e.z, gType[gFrag[i].type].volume * sc * sc * sc);
+    }
 }
 
 // When the air blast reaches a point in the yard. It leaves the building at the moment the
@@ -2259,7 +2402,15 @@ static void Update(float t)
             gFragMat[i] = FlightPose(i, t);
         } else if (IsBuilding(f->type)) {
             gFragTint[i] = tint;
-            gFragMat[i] = (t <= gMotion[i].t0) ? FragRest(f) : FlightPose(i, t);
+            if (t > gMotion[i].t0) {
+                gFragMat[i] = FlightPose(i, t);
+            } else {
+                // Still standing, but riding down on whatever is being crushed under it. The drop
+                // at its own release time is exactly what FlightPose starts from, so the two meet
+                // without a step.
+                float drop = CrushDrop(gMotion[i].seq, gMotion[i].rest.y + gMotion[i].drop, t);
+                gFragMat[i] = MatrixMultiply(FragRest(f), MatrixTranslate(0.0f, -drop, 0.0f));
+            }
         } else {
             gFragTint[i] = tint;
             gFragMat[i] = YardPose(i, t);
@@ -2520,22 +2671,23 @@ static void CheckCollapse(void)
         Vector3 c = Vector3Transform(m->c, land);
         float outward = fmaxf(fabsf(c.z) - FACE_Z, fabsf(c.x) - BLOCK_LEN * 0.5f);
         throwOut = fmaxf(throwOut, outward);
-        // Anything that was already under the finished crest before it fell had nowhere to go:
-        // the bottom of the building is the bottom of the pile, and that is not a solver failure.
-        Vector3 r = Vector3Transform(m->c, FragRest(&gFrag[i]));
-        if (r.y - m->half < PileY(r.x, r.z)) { entombed++; continue; }
-        deepest = fminf(deepest, c.y - m->half - PileY(c.x, c.z));
+        // A piece that never got off the ground is the bottom of the building becoming the
+        // bottom of the pile, not a solver failure.
+        if (m->t1 - m->t0 < 1e-3f) { entombed++; continue; }
+        Vector3 e = ExtentAt(i, m->t1 - m->t0);
+        deepest = fminf(deepest, c.y - e.y - PileUnder(c.x, c.z, e.x, e.z));
     }
-    TraceLog(LOG_INFO, "panelka: last piece lands at %.2f s of a %.1f s cycle, thrown up to %.1f m clear of the footprint; %d fragments began under the finished crest and stay there",
+    TraceLog(LOG_INFO, "panelka: last piece lands at %.2f s of a %.1f s cycle, thrown up to %.1f m clear of the footprint; %d fragments never leave the ground",
              last, CYCLE, throwOut, entombed);
     if (airborne > 0) {
         TraceLog(LOG_WARNING, "panelka: %d fragments are still in the air when the cycle ends", airborne);
     }
     // Everything must come to rest on the pile, not inside it. The tumble is about the centroid,
     // so a piece can still bury a corner; what is checked is that its centre lands on the surface.
-    if (deepest < -0.02f) {
-        TraceLog(LOG_WARNING, "panelka: a fragment settles %.3f m under the pile surface", -deepest);
-    }
+    // Each piece was solved against the surface that existed at the moment it landed, so the
+    // final grid standing above it means later material came down on top -- which is what a pile
+    // is. It is reported rather than warned about, and the number to watch is the deepest.
+    TraceLog(LOG_INFO, "panelka: the deepest fragment ends %.1f m under the finished pile surface", -deepest);
 }
 
 // A demolition is not periodic, and this is the one model here whose loop deliberately does not
@@ -2654,8 +2806,10 @@ static void Init(void)
         float sc = gFrag[i].scale;
         material += gType[gFrag[i].type].volume * sc * sc * sc;
     }
-    SolvePile(material);
     for (int i = 0; i < gFragCount; i++) PlanFragment(i);
+    SolveLanding();
+    TraceLog(LOG_INFO, "panelka: %.0f m3 of material bulks to %.0f; the packed pile crests at %.2f m against a %.2f m prediction",
+             material, material * BULK_FACTOR, PileCrest(), PredictedCrest(material));
 
     Update(0.0f);
 
@@ -2679,6 +2833,7 @@ static void Init(void)
     CheckBalconyRoot();
     CheckStructureMeets();
     CheckNothingBuried();
+    CheckPileGrid();
     CheckCollapse();
     CheckFlashSampling();
     CheckLoopSeam();
@@ -2735,10 +2890,14 @@ const Scene SCENE = {
         "\n"
         "The demolition.\n"
         "A 1-464 has no frame: every cross wall carries load, which is why the series went up so fast and why it comes down the way it does. Charges are drilled into the cross walls of the bottom two storeys and fired in a sequence running the length of the block, so the building loses its footing progressively and folds instead of toppling; what is above the cut then descends almost vertically and pancakes, with the facade panels peeling off outwards because nothing holds them on once the cross walls behind them are gone.\n"
-        "Every one of the 1355 fragments does three things and no more. It waits until the collapse front reaches it, which has two components: the firing sequence, running the length of the block in 0.42 s, and the crushing front, climbing at 11 m/s because each storey has to be destroyed before the one above it can start down. It flies ballistically, tumbling about its own centroid rather than its local origin, which would be a hinge no broken panel has. And it lands on the rubble pile. There is no contact between fragments; at this scale what reads is the timing and the peel, not any individual collision.\n"
+        "Every one of the 1355 fragments does three things and no more.\n"
+        "It rides down. The crush front leaves the cut when the charges under that part of the block fire and climbs at 11 m/s, and everything above it descends by 0.62 of the height that has gone underneath it, because that is what a crushed storey loses. This is what makes the event read as a building losing its footing rather than as a facade being blown off: without it a fragment simply waits in place until the front arrives, and the roof sits level over a stripped frame.\n"
+        "It flies, ballistically, tumbling about its own centroid rather than its local origin, which would be a hinge no broken panel has. The drop it had already taken at its release time is exactly where the flight starts, so the two meet without a step.\n"
+        "And it lands. There is no contact between fragments in flight: nothing here resolves a collision and a piece passes through whatever is in its way, because at this scale what reads is the timing and the peel rather than any individual impact.\n"
         "Glazing is the exception to the front: every window in the building goes at the shock rather than when its own storey is reached, thrown 3.6 to 7.8 m/s and spinning five times faster than a panel. Balconies are the other: a cantilever with nothing above it, so it fails 0.22 s early -- clamped so that nothing anywhere moves before the charges it is a consequence of.\n"
         "\n"
-        "How high the pile stands is not a chosen number. Each type\'s mesh volume is computed by the divergence theorem at build time, summed over every fragment that falls, bulked by 1.55 for what a solid becomes once it is broken, and fitted to the pile\'s own shape by integrating it: 1881 m3 of material makes 2916 of rubble and a crest 2.91 m deep. 226 fragments start under that crest and never move, because the bottom of the building is the bottom of the pile.\n"
+        "Where a piece comes to rest is decided by what is already there. The pile is a heightfield, and the fragments are planned in the order they land: each is put on top of whatever is in the cells its own footprint covers, and then deposits its own material -- volume by the divergence theorem, bulked by 1.55 -- spread over that footprint. 1877 m3 becomes 2909 of rubble and the packed pile crests at 5.8 m, against 4.2 m for a smooth mound of the same material; rigid pieces leave voids a smooth mound does not, so the packed one standing higher is the expected direction.\n"
+        "Both the landing point and the fragment\'s own extent depend on the flight time, and the flight time on both, so each is solved by four passes of the same substitution. The extent is taken at the orientation the piece actually lands in, from the support function of its transformed box, not from its upright height: a 2.66 m panel that comes down edge-on has a vertical extent of 0.15, and using the upright figure left it floating 1.3 m over the pile while a slab landing on edge was buried by the same amount.\n"
         "\n"
         "Dust is three populations, because one averaging them reads as ground fog. The jets are what comes straight back out of the drill holes at the instant the charges fire -- small, fast, outward at 15 to 24 m/s, dead inside two seconds. The surge is air driven out sideways by the floors slamming down on it, which leaves the footprint low and rolls outwards along the ground. The column is what rises off the pile afterwards, slower and much taller. 1190 puffs in all. A puff is thrown and then sheds its speed to the air as a first-order decay to a terminal displacement, which is why dust travels so much further than a thrown solid and then simply hangs.\n"
         "The soft edge is a second small shader, and both it and the technique are models/humvee.c\'s. A closed blob has a hard silhouette at any subdivision, so a puff\'s alpha is scaled by how squarely its surface faces the camera, which is zero exactly at its own silhouette; its normals are radial, of the sphere the lumps are pushed out from rather than of the lumpy surface, so that falloff runs monotonically to the edge instead of leaving a ring of zero alpha inside it. The detonation flashes run the same shader, additively: they were a radial glow disc at first, and the local planar projection put the blob\'s u,v in [-1,1] against a clamped texture whose disc occupies [0,1], so three quadrants of every flash sampled the transparent edge and what showed was a sliver.\n"
@@ -2759,6 +2918,8 @@ const Scene SCENE = {
     .update = Update,
     .duration = CYCLE,
     .animYaw = 40.0f,
+    // The collapse is over in three seconds of real time, which is too quick to follow by hand.
+    .previewSpeed = 0.45f,
     .parts = PARTS,
     .partCount = COUNT_OF(PARTS),
     .target = { 0.0f, 6.0f, 0.0f },
