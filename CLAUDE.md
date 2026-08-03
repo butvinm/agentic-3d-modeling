@@ -31,6 +31,8 @@ make clean-raylib                    # force a full raylib rebuild
 ./build/humvee --shots out --anim --frames 25        # step the pose instead of orbiting the camera
 ./build/humvee --shots out --phase 0.0 --frames 4    # freeze the pose at one moment and orbit that
 ./build/humvee --shots out --yaw 140                 # choose the camera angle without editing the model
+./build/ak47 --shots out --target 0,2.288,-2.99 --radius 0.9   # look closely at a detail that is not a part
+./tools/sheet.sh out                                 # montage a directory of frames into one labelled sheet
 
 ./tools/review.sh humvee             # build, render into the next renders/humvee/vN/, critique with Codex
 PART=running_gear ./tools/review.sh humvee
@@ -47,6 +49,10 @@ YAW=90 ./tools/review.sh humvee
 `--phase F` is the other half of that: it freezes the pose at fraction F of the cycle and lets the turntable orbit that one moment, which is the only way to see a posed part from several sides at the same instant. It refuses to run with `--anim`, since one steps the pose and the other holds it, and like `--anim` it is ignored with a warning on a scene that declares no `update`. F is cyclic, so 1.5 and 0.5 are the same pose. It also pins the interactive window, which is the cheapest way to walk around one instant by hand.
 
 `--yaw` overrides both: the angle `--anim` holds, the angle a turntable starts from, and the window's opening angle. It exists so `SCENE.animYaw` stays the angle a review is judged at.
+
+`--target X,Y,Z` and `--radius R` aim the camera at a point the model never declared as a part, and orbit it at whatever distance you ask for. Without them, inspecting a detail means rendering the whole model and cropping the PNG afterwards, which two sessions did thirty-three times between them and once at the wrong coordinates. They compose with `--part`, `--phase` and `--yaw`. When the detail is a part, `--part` is still better, because it derives its own framing from the built mesh.
+
+`tools/sheet.sh <dir> [out.png] [columns]` montages a directory of frames into one labelled contact sheet. Each tile keeps its filename, so a finding can name the frame it is about.
 
 After a fresh clone: `git submodule update --init` then `make`.
 

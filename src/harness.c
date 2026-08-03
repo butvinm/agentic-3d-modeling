@@ -96,18 +96,27 @@ static void FrameBounds(BoundingBox box, Vector3 *target, float *distance)
     *distance = radius / sinf(FOVY * DEG2RAD * 0.5f) * 1.15f;
 }
 
+// --target and --radius aim the camera at a point the model never declared as a part. Inspecting a detail otherwise means rendering the whole model and cropping the PNG afterwards, which two sessions did thirty-three times between them, once at the wrong coordinates because the crop box was guessed rather than derived. A part's own bounds are still the better lever when the detail happens to be a part; these are for everything else.
+static bool gTargetSet = false;
+static Vector3 gTarget;
+static float gRadius = NAN;
+
 static void SceneFraming(Vector3 *target, float *distance, float *pitchDeg)
 {
     if (activePart && activePart->bounds) {
         FrameBounds(activePart->bounds(), target, distance);
         *pitchDeg = 22.0f;
-        return;
     }
-    float r = OrbitRadius();
-    float h = SCENE.orbitHeight;
-    *target = SCENE.target;
-    *distance = sqrtf(r * r + h * h);
-    *pitchDeg = atan2f(h, r) * RAD2DEG;
+    else {
+        float r = OrbitRadius();
+        float h = SCENE.orbitHeight;
+        *target = SCENE.target;
+        *distance = sqrtf(r * r + h * h);
+        *pitchDeg = atan2f(h, r) * RAD2DEG;
+    }
+
+    if (gTargetSet) *target = gTarget;
+    if (!isnan(gRadius)) *distance = gRadius;
 }
 
 static void DrawWorld(Camera3D cam)
@@ -258,12 +267,14 @@ static void RunInteractive(void)
 
 static void Usage(const char *argv0)
 {
-    printf("usage: %s [--shots DIR] [--anim] [--phase F] [--frames N] [--size WxH] [--supersample N] [--part NAME] [--yaw DEG]\n", argv0);
+    printf("usage: %s [--shots DIR] [--anim] [--phase F] [--frames N] [--size WxH] [--supersample N] [--part NAME] [--yaw DEG] [--target X,Y,Z] [--radius R]\n", argv0);
     printf("  no args        open an interactive orbit-camera window\n");
     printf("  --shots        render N turntable views to DIR as PNG and exit\n");
     printf("  --anim         with --shots, hold the camera and step the pose through one cycle instead\n");
     printf("  --phase F      freeze the pose at fraction F of the cycle; the turntable then orbits that one moment\n");
     printf("  --yaw DEG      camera yaw: the angle --anim holds, or the one a turntable starts from\n");
+    printf("  --target X,Y,Z aim the camera at a point rather than at the scene's own target\n");
+    printf("  --radius R     orbit at that distance, to look closely at a detail that is not a part\n");
     printf("  --part NAME    render only that part, framed to its own bounds\n");
     printf("  --list-parts   print this scene's part names and exit\n");
 }
@@ -294,6 +305,14 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--supersample") == 0 && i + 1 < argc) ss = atoi(argv[++i]);
         else if (strcmp(argv[i], "--yaw") == 0 && i + 1 < argc) gYawOverride = (float)atof(argv[++i]);
         else if (strcmp(argv[i], "--phase") == 0 && i + 1 < argc) gPhase = (float)atof(argv[++i]);
+        else if (strcmp(argv[i], "--radius") == 0 && i + 1 < argc) gRadius = (float)atof(argv[++i]);
+        else if (strcmp(argv[i], "--target") == 0 && i + 1 < argc) {
+            if (sscanf(argv[++i], "%f,%f,%f", &gTarget.x, &gTarget.y, &gTarget.z) != 3) {
+                fprintf(stderr, "bad --target, expected X,Y,Z\n");
+                return 2;
+            }
+            gTargetSet = true;
+        }
         else if (strcmp(argv[i], "--list-parts") == 0) {
             for (int p = 0; p < SCENE.partCount; p++) printf("%s\n", SCENE.parts[p].name);
             return 0;
