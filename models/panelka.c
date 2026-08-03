@@ -7,6 +7,7 @@
 #include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
 
 // ---------------------------------------------------------------------------
 // A three-section 1-464 khrushchyovka standing in its own courtyard.
@@ -450,8 +451,8 @@ static Texture2D MakePebbleTexture(Color matrix, Color pebble, unsigned int seed
                 255,
             };
             // A slow soiling over the top, so one panel is not uniformly the same grey across its whole 2.6 m.
-            px[y * S + x] = Shade(c, (Fbm(u, v, 3, seed + 41u, 3) - 0.5f) * 16.0f
-                                   + (Fbm(u, v, 224, seed + 59u, 2) - 0.5f) * 10.0f);
+            px[y * S + x] = Shade(c, (Fbm(u, v, 3, seed + 41u, 3) - 0.5f) * 9.0f
+                                   + (Fbm(u, v, 224, seed + 59u, 2) - 0.5f) * 6.0f);
         }
     }
     return Upload(img, TEXTURE_WRAP_REPEAT);
@@ -618,7 +619,7 @@ static Texture2D MakeLeafTexture(void)
 
 static void MakeTextures(void)
 {
-    MAT_TEX[MAT_PANEL]    = MakePebbleTexture((Color){ 78, 76, 70, 255 }, (Color){ 158, 154, 142, 255 }, 3u);
+    MAT_TEX[MAT_PANEL]    = MakePebbleTexture((Color){ 100, 97, 90, 255 }, (Color){ 152, 148, 137, 255 }, 3u);
     // The smooth cast border every panel carries round its aggregate field, and the reveal of every opening cut through it: lighter than the field's average and with none of its tooth, which is exactly what makes the joint grid read as a pale cross rather than as a shadow.
     MAT_TEX[MAT_JOINT]    = MakeRenderTexture((Color){ 128, 126, 119, 255 }, 71u, 12.0f, 7.0f);
     MAT_TEX[MAT_CONCRETE] = MakeConcreteTexture();
@@ -850,18 +851,23 @@ static const float BAY_W[BAYS] = { 2.6f, 3.2f, 2.6f, 2.6f, 2.6f, 3.2f, 2.6f };
 #define FACE_Z        (HALF_D + WALL_T * 0.5f)   // 5.91, outer face of the facade
 #define INNER_Z       (HALF_D - WALL_T * 0.5f)   // 5.61, inner face
 
-// Half the smooth border between two panels: each aggregate field insets by this, so two neighbours leave 2 x JOINT of cast render between them.
-// Measured off ref_05.jpg rather than chosen. Scaling that photograph by the 2.66 m storey -- four sills at 310 px apart -- gives 116.5 px/m, and the pale band between two panels reads 45 px both horizontally and vertically, so 0.386 m, or 0.19 m a side. 0.170 is that reading pulled in by a tenth, because a blurred pale-to-dark edge measures wide.
-// The first build had 0.045, and a 0.09 m band at 60 m is a third of a pixel: it is the single reason that build's facade rendered as an unbroken grey sheet with windows in it.
-#define JOINT         0.170f
+// Half the smooth cast border between two panels: the aggregate field sets back by this, so two neighbours leave twice it between them.
+//
+// Two numbers, not one, and both read off ref_05.jpg against a metric ruler drawn on the unscaled image at 117.7 px/m -- the storey pitch recovered by autocorrelating a window-free column of the gable, 313 px for 2.66 m. The band between two fields measures about 0.085 m vertically and 0.145 m horizontally, so 0.043 and 0.072 a side. The horizontal is genuinely the wider of the two: it is the bed the floor slab bears in and it is packed with mortar, where the vertical is a caulked butt.
+//
+// A first pass at this put both at 0.170, off a 45 px reading taken on a crop that had been upscaled two-fold and then divided by the unscaled image's px/m. The error is worth recording rather than just fixing, because the conclusion drawn from it -- that the first build's facade read as a flat grey sheet because its border was too thin -- was wrong twice over. The border was about right at 0.045. What was missing was that both layers carried the same map, so there was nothing to see at any width; the fix that mattered was giving the core the smooth render map and the field the aggregate one.
+#define JOINT_V       0.045f
+#define JOINT_H       0.072f
+// The margin an opening must keep clear, which is the larger of the two, since one opening is checked against both edges.
+#define JOINT         JOINT_H
 // How far every piece is grown past its own edge so that it knits into its neighbour instead of
 // meeting it on an exactly coincident plane. Two coplanar back-to-back faces are the one thing
 // this file draws hundreds of, and left touching they speckle along every joint: the rasterizer
 // picks between them per pixel and the facade comes out ruled with dashed lines. It is also the
 // honest construction, since a real panel is butted and caulked rather than laid edge to edge.
 #define KNIT          0.006f
-// How far the aggregate field stands proud of the smooth border round it. ref_05 shows a shallow step, not the 0.06 m rebate the first build had, which at this border width would have thrown a 60 mm shadow all the way round every panel.
-#define FACE_T        0.022f
+// How far the aggregate field stands proud of the smooth border round it. ref_05 shows the two nearly flush -- a lip you can see the shadow of and no more -- rather than the 0.06 m rebate the first build had, which threw a 60 mm shadow all the way round every panel.
+#define FACE_T        0.014f
 #define CORE_T        (WALL_T - FACE_T)
 // How coarse a cell the face layer's decomposition may leave. It changes no geometry: it exists so the streak in PanelGrime has vertices to be written onto, and it is only asked of the layer whose face is seen. Cost is per panel *type*, not per instance -- there are eleven types behind 210 panels.
 #define PANEL_SEG     0.22f
@@ -1041,8 +1047,8 @@ static void FacadePiece(Group *g, float w, float h, const Rect *op, int nop, flo
     gGrimeNop = (nop < MAX_OPENINGS) ? nop : MAX_OPENINGS;
     gGrimeH = h;
     gShadeFn = PanelGrime;
-    WallLayer(&g->b[MAT_PANEL], atL ? -hw + JOINT : xa - KNIT, atR ? hw - JOINT : xb + KNIT,
-              JOINT, h - JOINT, CORE_T, WALL_T, op, nop, PANEL_SEG);
+    WallLayer(&g->b[MAT_PANEL], atL ? -hw + JOINT_V : xa - KNIT, atR ? hw - JOINT_V : xb + KNIT,
+              JOINT_H, h - JOINT_H, CORE_T, WALL_T, op, nop, PANEL_SEG);
     gShadeFn = NULL;
 }
 
@@ -1060,8 +1066,8 @@ static void FacadePanel(Group *g, float w, float h, const Rect *op, int nop)
 
 // Two generations of window, which is the loudest thing about a khrushchyovka facade today and the thing the first build had none of: ref_03, ref_05, ref_06 and ref_07 all show a chequerboard of white plastic replacements against the original painted timber, flat by flat, because each flat replaced its own when it could afford to.
 // The plastic one is two lights on an off-centre mullion and nothing else. The original is heavier in section, splits down the middle, and carries a transom across the full width with a small hinged vent (a fortochka) in one upper light, which is the detail that dates it.
-#define GLZ_BAR_PVC   0.052f
-#define GLZ_BAR_TIM   0.072f
+#define GLZ_BAR_PVC   0.046f
+#define GLZ_BAR_TIM   0.092f
 
 static void Joinery(Group *g, Rect r, bool pvc)
 {
@@ -1484,14 +1490,15 @@ static void BuildStructureTypes(void)
     {
         // The painted sheet the resident fixed to that steel, and the capping rail over it.
         Group *g = &gType[FR_BALCSHEET];
+        // Standing on the slab rather than flush with its edge, and inset from it, so the concrete the whole balcony hangs off stays visible under and beside the painted sheet. A review round read the enclosed ones as coloured rectangles applied to the wall, and this is why: the sheet reached the slab's own outer face and there was nothing left of the cantilever to see.
         Builder *p = &g->b[MAT_PAINT];
-        Box(p, -hw, hw, 0.030f, rt - 0.045f, BALC_D - 0.075f, BALC_D - 0.040f);
-        Box(p, -hw + 0.010f, -hw + 0.045f, 0.030f, rt - 0.045f, 0.030f, BALC_D);
-        Box(p, hw - 0.045f, hw - 0.010f, 0.030f, rt - 0.045f, 0.030f, BALC_D);
+        Box(p, -hw + 0.035f, hw - 0.035f, 0.030f, rt - 0.045f, BALC_D - 0.110f, BALC_D - 0.075f);
+        Box(p, -hw + 0.035f, -hw + 0.070f, 0.030f, rt - 0.045f, 0.060f, BALC_D - 0.075f);
+        Box(p, hw - 0.070f, hw - 0.035f, 0.030f, rt - 0.045f, 0.060f, BALC_D - 0.075f);
         Builder *m = &g->b[MAT_METAL];
-        Box(m, -hw - 0.020f, hw + 0.020f, rt - 0.045f, rt, BALC_D - 0.095f, BALC_D + 0.020f);
-        Box(m, -hw - 0.020f, -hw + 0.075f, rt - 0.045f, rt, 0.0f, BALC_D + 0.020f);
-        Box(m, hw - 0.075f, hw + 0.020f, rt - 0.045f, rt, 0.0f, BALC_D + 0.020f);
+        Box(m, -hw + 0.015f, hw - 0.015f, rt - 0.045f, rt, BALC_D - 0.135f, BALC_D - 0.050f);
+        Box(m, -hw + 0.015f, -hw + 0.090f, rt - 0.045f, rt, 0.040f, BALC_D - 0.050f);
+        Box(m, hw - 0.090f, hw - 0.015f, rt - 0.045f, rt, 0.040f, BALC_D - 0.050f);
     }
     {
         // The enclosure, glazed in up to the underside of the balcony above. Its frame carries the flat's colour, white on a plastic one and a brown or an ochre on the timber ones ref_05 and ref_07 are full of. The glass has to be a fourth group rather than a fourth material, for the same reason the window pane is its own group and for the same reason the car's glass is not part of its body: a per-instance tint reaches every material in the group it is applied to, so glass left in here would come out brown behind a brown frame.
@@ -1499,19 +1506,20 @@ static void BuildStructureTypes(void)
         Group *q = &gType[FR_BALCPANE];
         float top = STOREY - BALC_T - 0.030f;
         Builder *f = &g->b[MAT_PAINT];
-        Box(f, -hw, hw, rt, rt + 0.060f, BALC_D - 0.070f, BALC_D - 0.010f);
-        Box(f, -hw, hw, top - 0.060f, top, BALC_D - 0.070f, BALC_D - 0.010f);
-        Box(f, -hw, -hw + 0.060f, rt, top, 0.0f, BALC_D);
-        Box(f, hw - 0.060f, hw, rt, top, 0.0f, BALC_D);
-        Box(f, -hw, hw, top - 0.055f, top, 0.0f, BALC_D);
-        for (int i = 1; i < 4; i++) {
-            float x = -hw + BALC_W * (float)i / 4.0f;
-            Box(f, x - 0.032f, x + 0.032f, rt, top, BALC_D - 0.070f, BALC_D - 0.010f);
+        float fz1 = BALC_D - 0.055f, fz0 = fz1 - 0.045f;
+        Box(f, -hw + 0.015f, hw - 0.015f, rt, rt + 0.045f, fz0, fz1);
+        Box(f, -hw + 0.015f, hw - 0.015f, top - 0.045f, top, fz0, fz1);
+        Box(f, -hw + 0.015f, -hw + 0.060f, rt, top, 0.050f, fz1);
+        Box(f, hw - 0.060f, hw - 0.015f, rt, top, 0.050f, fz1);
+        Box(f, -hw + 0.015f, hw - 0.015f, top - 0.045f, top, 0.050f, fz1);
+        // Six lights across three metres, which is what a resident's glazier fits, and thin enough that the glass is what shows rather than the frame.
+        for (int i = 1; i < 6; i++) {
+            float x = -hw + BALC_W * (float)i / 6.0f;
+            Box(f, x - 0.022f, x + 0.022f, rt, top, fz0, fz1);
         }
-        Box(&q->b[MAT_GLASS], -hw + 0.055f, hw - 0.055f, rt + 0.055f, top - 0.060f,
-            BALC_D - 0.055f, BALC_D - 0.030f);
-        Box(&q->b[MAT_GLASS], -hw + 0.055f, -hw + 0.070f, rt + 0.055f, top - 0.060f, 0.030f, BALC_D - 0.060f);
-        Box(&q->b[MAT_GLASS], hw - 0.070f, hw - 0.055f, rt + 0.055f, top - 0.060f, 0.030f, BALC_D - 0.060f);
+        Box(&q->b[MAT_GLASS], -hw + 0.030f, hw - 0.030f, rt + 0.040f, top - 0.045f, fz0 + 0.012f, fz0 + 0.030f);
+        Box(&q->b[MAT_GLASS], -hw + 0.045f, -hw + 0.063f, rt + 0.040f, top - 0.045f, 0.070f, fz0);
+        Box(&q->b[MAT_GLASS], hw - 0.063f, hw - 0.045f, rt + 0.040f, top - 0.045f, 0.070f, fz0);
     }
 
     // The entrance canopy: a slab on two brackets over the door.
@@ -2151,6 +2159,13 @@ static void PlaceBuilding(void)
                 for (int i = 0; i < b; i++) x += BAY_W[i];
                 // The boundary between two sections is one wall, not two.
                 if (b == BAYS && s != SECTIONS - 1) continue;
+
+                // At the two ends of the block that boundary is the gable itself, and a wall centred on it stands XWALL_T/2 - 0 = 0.07 m *outside* the gable's own outer face, hiding all four of its panels behind a blank strip. That is what the block's ends had rendered as from the first build: a smooth grey slab banded once per storey, which is this wall's own gap at each floor slab and not a panel joint at all. Two review rounds read the gable as under-divided and neither could see why, because the gable was never what was being looked at.
+                // Pulled inboard until its outer face is buried 10 mm inside the panel, which is where a cross wall meeting an end wall is, and derived from the panel it meets rather than typed.
+                float end = BLOCK_LEN * 0.5f;
+                if (x < -end + 1e-3f) x += WALL_T + XWALL_T * 0.5f - 0.010f;
+                else if (x > end - 1e-3f) x -= WALL_T + XWALL_T * 0.5f - 0.010f;
+
                 for (int side = 0; side < 2; side++) {
                     for (int i = 0; i < 2; i++) {
                         Emit(FR_XWALL, x, y, (side == 0) ? SpanPieceZ(i) : -SpanPieceZ(i), 0.0f);
@@ -2981,8 +2996,8 @@ static void Update(float t)
 {
     for (int i = 0; i < gFragCount; i++) {
         Fragment *f = &gFrag[i];
-        // +-8 either side of white. Enough to separate two neighbouring panels, not enough to read as a repainted one.
-        int k = (int)(230.0f + 25.0f * f->shade);
+        // A few per cent either side of white. Enough that two neighbours are not bit-identical, and no more: at +-5 per cent a review read the facade as a patchwork of rectangular tiles, which is a worse artefact than the repetition it was put in to break up.
+        int k = (int)(240.0f + 15.0f * f->shade);
         Color tint = TintMul((Color){ (unsigned char)k, (unsigned char)k, (unsigned char)k, 255 }, f->tint);
 
         if (f->type == FR_RUBBLE) {
@@ -3143,10 +3158,10 @@ static void CheckOpenings(const char *name, float w, float h, const Rect *op, in
 {
     float worst = 1e9f;
     for (int i = 0; i < nop; i++) {
-        worst = fminf(worst, op[i].x0 - (-w * 0.5f + JOINT));
-        worst = fminf(worst, (w * 0.5f - JOINT) - op[i].x1);
-        if (op[i].y0 > 1e-4f) worst = fminf(worst, op[i].y0 - JOINT);   // a doorway reaches the floor: there is no panel under it to leave a margin in
-        worst = fminf(worst, (h - JOINT) - op[i].y1);
+        worst = fminf(worst, op[i].x0 - (-w * 0.5f + JOINT_V));
+        worst = fminf(worst, (w * 0.5f - JOINT_V) - op[i].x1);
+        if (op[i].y0 > 1e-4f) worst = fminf(worst, op[i].y0 - JOINT_H);   // a doorway reaches the floor: there is no panel under it to leave a margin in
+        worst = fminf(worst, (h - JOINT_H) - op[i].y1);
         if (i > 0 && op[i].x0 < op[i - 1].x1) {
             TraceLog(LOG_ERROR, "panelka: %s openings %d and %d are out of order or overlap", name, i - 1, i);
         }
@@ -3233,6 +3248,40 @@ static void CheckFlatVariety(void)
              n, pvc, ac, bal[BAL_OPEN], bal[BAL_TIMBER], bal[BAL_PVC], distinctCurtains, COUNT_OF(CURTAIN));
     if (pvc == 0 || pvc == n || bal[BAL_OPEN] == n || distinctCurtains < 3) {
         TraceLog(LOG_ERROR, "panelka: the flat hashes have collapsed and the facade is uniform");
+    }
+}
+
+// Nothing structural may reach the outside of the skin it stands behind.
+//
+// This is the check that the end cross wall needed and did not have. Standing 0.07 m proud of the gable, it hid every panel of both end walls behind a blank grey strip, through the first build and two review rounds; what a critique could say was that the gable read as under-divided, which sent two sessions looking at the gable's own decomposition, where the gable was not what was being drawn there at all. A defect that hides the thing you would inspect to find it does not get found by looking harder.
+//
+// Only the frame is asked. The parapet's capping oversails the facade on purpose, the balconies project a metre, the plinth stands 0.1 m out, and the canopy and the vent stacks are not behind anything.
+static void CheckStructureInside(void)
+{
+    static const FragType FRAME[] = { FR_XWALL, FR_SPINE26, FR_SPINE32, FR_SLAB26, FR_SLAB32, FR_ROOF26, FR_ROOF32 };
+    float outX = 0.0f, outZ = 0.0f;
+    FragType worstX = FR_COUNT, worstZ = FR_COUNT;
+
+    for (int i = 0; i < gFragCount; i++) {
+        bool frame = false;
+        for (int k = 0; k < COUNT_OF(FRAME); k++) frame = frame || (gFrag[i].type == FRAME[k]);
+        if (!frame) continue;
+
+        BoundingBox b = gType[gFrag[i].type].bounds;
+        Matrix m = FragRest(&gFrag[i]);
+        for (int c = 0; c < 8; c++) {
+            Vector3 p = { (c & 1) ? b.max.x : b.min.x, (c & 2) ? b.max.y : b.min.y, (c & 4) ? b.max.z : b.min.z };
+            p = Vector3Transform(p, m);
+            if (fabsf(p.x) - BLOCK_LEN * 0.5f > outX) { outX = fabsf(p.x) - BLOCK_LEN * 0.5f; worstX = gFrag[i].type; }
+            if (fabsf(p.z) - FACE_Z > outZ) { outZ = fabsf(p.z) - FACE_Z; worstZ = gFrag[i].type; }
+        }
+    }
+    TraceLog(LOG_INFO, "panelka: the frame reaches %.3f m past the gable (%s) and %.3f m past the facade (%s)",
+             outX, worstX < FR_COUNT ? TYPE_NAME[worstX] : "-",
+             outZ, worstZ < FR_COUNT ? TYPE_NAME[worstZ] : "-");
+    // KNIT is how far every piece is deliberately grown past its own edge, so anything at or under it is the knit and anything over it is a piece standing in front of the skin.
+    if (outX > KNIT + 1e-4f || outZ > KNIT + 1e-4f) {
+        TraceLog(LOG_WARNING, "panelka: a frame member stands outside the skin and will draw over it");
     }
 }
 
@@ -3385,24 +3434,53 @@ static void CheckFlashSampling(void)
 // Scene
 // ---------------------------------------------------------------------------
 
-// The one scene-wide thing this model sets that is normally the harness's business, and it is
-// here because the harness's three lights are point lights standing at (8,10,8), (-9,5,-7) and
-// (0,-9,5). Those surround a 4.5 m vehicle. They sit *inside* a 58 m building, so every outward
-// facing surface on it points away from all three, and lighting.fs falls back on its ambient
-// term -- which line 75 divides by ten. That is measurable rather than arguable: a 118 texel
-// with no light on it comes out of the gamma correction at 0.16, which is what turned the gable
-// wall into a black slab.
-// A directional light is the only kind whose geometry does not depend on the size of the scene,
-// so this fills the shader's one free slot with a sun rather than moving the harness's lights,
-// which would change every other model in the repo. The three point lights stay as they are and
-// act as the fill.
+// The one scene-wide thing this model sets that is normally the harness's business, and it is here because of a mismatch of scale that nothing else can fix.
+//
+// The harness lights with three point lights at (8,10,8), (-9,5,-7) and (0,-9,5). Those surround a 4.5 m vehicle. They sit *inside* a 58 m building, so every outward-facing surface on it points away from all three and lighting.fs falls back on its ambient term, which its line 75 divides by ten: against the harness's ambient of 0.39, a 118 texel comes out of the gamma correction at 0.16.
+//
+// An earlier revision put a sun in the shader's one free slot and called that fixed. It was not, and a full eight-frame turntable is what showed it: a single directional light lights one quarter of a compass, so the front facade and the +X gable came out well and the back facade and the -X gable rendered as black silhouettes. Three of eight frames of every turntable of this model were unusable, and every render anyone had looked at happened to be one of the lit five.
+//
+// Two directional lights is the fix, and the second one costs a slot the model does not have. It takes the third harness light instead, which is a 40/39/47 fill standing at (0,-9,5) -- below the ground plane, inside the footprint, and the least useful of the three at this scale by a wide margin. rlights hands out slots in order, so the sun is index 3 and that fill is index 2, and the uniforms are set by name because rlights offers no way to reach a light somebody else created. Both facts are asserted below rather than assumed.
+//
+// The ambient goes up as well. It is what every surface facing neither light gets, and the harness's value is calibrated for an object small enough to be surrounded.
+static void SetLightUniform(Shader sh, int slot, const char *field, const void *v, int type)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "lights[%d].%s", slot, field);
+    SetShaderValue(sh, GetShaderLocation(sh, name), v, type);
+}
+
 static void AddSun(void)
 {
     Shader sh = HarnessLightingShader();
     if (sh.id == 0) return;
+
     Light sun = CreateLight(LIGHT_DIRECTIONAL, (Vector3){ 46.0f, 58.0f, 38.0f }, Vector3Zero(),
                             (Color){ 176, 168, 148, 255 }, sh);
-    if (!sun.enabled) TraceLog(LOG_WARNING, "panelka: no free light slot, the far gable will render on ambient alone");
+    if (!sun.enabled) {
+        TraceLog(LOG_ERROR, "panelka: no free light slot, half of every turntable will render as a silhouette");
+        return;
+    }
+    // rlights fills slots in order and the harness took the first three, so the sun must be index 3. If that ever stops being true the fill below would overwrite a light that is doing real work, which is worth an error rather than a surprise.
+    if (sun.enabled && GetShaderLocation(sh, "lights[3].enabled") < 0) {
+        TraceLog(LOG_ERROR, "panelka: the shader has no fourth light slot");
+    }
+
+    // The sky fill, from the opposite quarter and much weaker, so a surface facing away from the sun is shaded rather than unlit. Cool against the sun's warm, which is what an overcast north sky is.
+    const int FILL = 2;
+    int type = LIGHT_DIRECTIONAL, enabled = 1;
+    float pos[3] = { -52.0f, 34.0f, -44.0f };
+    float target[3] = { 0.0f, 0.0f, 0.0f };
+    float col[4] = { 88.0f / 255.0f, 96.0f / 255.0f, 112.0f / 255.0f, 1.0f };
+    SetLightUniform(sh, FILL, "enabled", &enabled, SHADER_UNIFORM_INT);
+    SetLightUniform(sh, FILL, "type", &type, SHADER_UNIFORM_INT);
+    SetLightUniform(sh, FILL, "position", pos, SHADER_UNIFORM_VEC3);
+    SetLightUniform(sh, FILL, "target", target, SHADER_UNIFORM_VEC3);
+    SetLightUniform(sh, FILL, "color", col, SHADER_UNIFORM_VEC4);
+
+    // And what is left for a surface that faces neither: the underside of a balcony, the inside of a stairwell, a slab lying face down on the pile.
+    float ambient[4] = { 0.62f, 0.63f, 0.70f, 1.0f };
+    SetShaderValue(sh, GetShaderLocation(sh, "ambient"), ambient, SHADER_UNIFORM_VEC4);
 }
 
 static void Init(void)
@@ -3481,6 +3559,7 @@ static void Init(void)
     CheckPanels();
     CheckTypesBuilt();
     CheckFlatVariety();
+    CheckStructureInside();
     CheckHeadroom();
     CheckBalconyRoot();
     CheckStructureMeets();
