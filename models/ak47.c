@@ -1275,8 +1275,13 @@ static void BuildMag(void)
 }
 
 // ---------------------------------------------------------------------------
-// Trigger group and pistol grip, z 492 to 645
+// Trigger group and pistol grip, z 486 to 645
 // ---------------------------------------------------------------------------
+
+// Magazine catch boss, measured off ref_05: its front face sits just behind the magazine's rear-top corner, which MagFrames puts at z 482.
+#define MCATCH_Z0  486.0f
+#define MCATCH_Z1  503.0f
+#define MCATCH_Y1  146.8f   // the boss's underside, and therefore where the catch hangs from
 
 static void BuildFire(void)
 {
@@ -1296,22 +1301,44 @@ static void BuildFire(void)
     Sweep(s, bowSect, bn, bowFr, 6, true, true);
     Prism(s, -8.0f, 8.0f, 502.0f, 514.0f, 135.8f, 135.8f, 172.0f, 141.0f);
     Prism(s, -8.0f, 8.0f, 558.0f, 570.0f, 133.4f, 133.4f, 139.0f, 172.0f);
-    Box(s, -6.0f, 6.0f, 130.0f, 152.0f, 492.0f, 502.0f);
+    // Magazine catch, which ref_05 shows as two parts and this model had as one 22 mm block in roughly the right place: a boss riveted under the receiver behind the magazine, and the thin catch itself hanging out of the bottom of it.
+    // The boss's roof is RecvFloor's, buried 1.5 mm up into the receiver it hangs from rather than typed as a number that stops agreeing the next time that floor line is edited. The floor drops 1.4 mm across these 17 mm, so a flat roof here would gap at one end.
+    Prism(s, -7.0f, 7.0f, MCATCH_Z0, MCATCH_Z1, MCATCH_Y1, MCATCH_Y1,
+          RecvFloor(MCATCH_Z0) + 1.5f, RecvFloor(MCATCH_Z1) + 1.5f);
+    Tube(s, (Vector3){ 7.0f, 152.0f, 496.0f }, (Vector3){ 8.4f, 152.0f, 496.0f }, 2.0f, 1.7f, 10, false, true);
+    Tube(s, (Vector3){ -8.4f, 152.0f, 496.0f }, (Vector3){ -7.0f, 152.0f, 496.0f }, 1.7f, 2.0f, 10, true, false);
+
+    // The catch: 12 mm of thin plate raked aft as it drops, tapering to the tip your thumb pushes. It starts inside the boss rather than on its face, so the two are one body and not two touching planes.
+    Vector3 latch[8] = {
+        { -1.7f, 132.6f, 495.6f }, { 1.7f, 132.6f, 495.6f }, { 1.7f, 132.6f, 497.0f }, { -1.7f, 132.6f, 497.0f },
+        { -2.9f, MCATCH_Y1 + 2.0f, 491.6f }, { 2.9f, MCATCH_Y1 + 2.0f, 491.6f },
+        { 2.9f, MCATCH_Y1 + 2.0f, 494.8f }, { -2.9f, MCATCH_Y1 + 2.0f, 494.8f },
+    };
+    Hex(s, latch);
 
     // The trigger has moved to its own group: it swings, so it cannot share a mesh with the guard it swings inside.
 
+    // Front and back edges read off ref_05 station by station at 4x, at 0.390 mm/px; the centreline and half depth below are what those two edges give. Only the widths across x are inferred, since a side elevation cannot show them.
+    // What was wrong was the taper. Five nodes ran the half depth 31, 27.5, 24.5, 22, 19.5 evenly from receiver to toe, which is a wedge, and a grip that thins all the way down has nothing to hold: it rendered as a slab. The rifle holds 29.8 at y 153 and is still at 26 by y 112, gives up most of the rest between there and y 75, and only then rounds off hard over the last 12 mm into the toe.
+    // The front edge is also concave rather than straight, sitting 1 to 3 mm aft of its own chord the whole way down, which is the finger relief. Nothing here needs to encode that separately: measuring the centreline from both edges puts it in.
     Vector2 sect[SECT_MAX];
-    Frame fr[6];
+    Frame fr[9];
     static const Node grip[] = {
-        { 588.0f, 172.0f, 14.2f, 31.0f },
-        { 601.0f, 134.0f, 14.6f, 27.5f },
-        { 610.0f, 105.0f, 15.2f, 24.5f },
-        { 617.0f,  84.0f, 15.5f, 22.0f },
-        { 620.0f,  71.0f, 14.4f, 19.5f },
+        { 586.7f, 172.0f, 14.0f, 29.5f },   // buried into the receiver, against the guard's rear web
+        { 591.6f, 153.0f, 14.6f, 28.8f },
+        { 598.9f, 126.0f, 15.3f, 26.5f },
+        { 602.3f, 112.0f, 15.6f, 25.9f },
+        { 609.0f,  97.0f, 15.7f, 22.7f },
+        { 612.0f,  85.0f, 15.5f, 22.6f },
+        { 614.8f,  75.0f, 15.0f, 21.9f },
+        { 615.0f,  67.0f, 13.8f, 18.4f },
+        { 615.6f,  62.5f, 11.0f,  9.5f },   // toe, rounded off rather than cut square
     };
-    int n = RoundRect(sect, 0.24f, 3);
-    NodeFrames(fr, grip, 5);
-    Sweep(w, sect, n, fr, 5, true, true);
+    // hh is perpendicular to the path and the measurements are horizontal, so each is the measured half depth times the cosine of the 15 degree rake. The path stays monotonic in z even through the toe, where the photograph's front edge turns back on itself: reversing it would flip the frame NodeFrames builds from a central difference, and the shrinking hh rounds the toe just as well.
+    // A rounder section than the 0.24 this had, because the other half of reading as a slab is four near-square corners running the length of a part nothing else on the rifle is shaped like.
+    int n = RoundRect(sect, 0.45f, 4);
+    NodeFrames(fr, grip, 9);
+    Sweep(w, sect, n, fr, 9, true, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -1426,17 +1453,31 @@ static void BuildTrigger(void)
     GroupOrigin(&gTrigger, (Vector3){ 0.0f, TRIG_PIVOT_Y, TRIG_PIVOT_Z });
     Builder *s = &gTrigger.b[MAT_GREY];
 
-    Vector3 trig[8] = {
-        { -2.5f, 140.0f, 531.0f }, { 2.5f, 140.0f, 531.0f }, { 2.5f, 152.0f, 549.0f }, { -2.5f, 152.0f, 549.0f },
-        { -2.5f, 150.0f, 531.0f }, { 2.5f, 150.0f, 531.0f }, { 2.5f, 172.0f, 549.0f }, { -2.5f, 172.0f, 549.0f },
+    // A swept ribbon, not a pair of blocks. The trigger is a stamped blade about 5 wide that hangs from the pin, sweeps down and forward and curls its toe forward into a hook, and a hexahedron cannot be any of that: the two blocks this replaces filled the whole triangle between the pin and the guard and read as a shark fin rather than a trigger.
+    // The centreline and the thickness at each station are measured off references/ak47/ref_05.jpg, which resolves the fire control group at 0.390 mm/px: the rifle spans 2254 px for its 880 mm, and the receiver floor and the guard's underside both land within a millimetre of where this model already has them, which is what makes the rest of the reading trustworthy.
+    // hh is the half thickness perpendicular to the path, so it is a thickness in z while the blade hangs and a thickness in y once the toe has turned forward. That is the whole reason this is a sweep: one number means the right thing all the way round the hook.
+    Vector2 sect[SECT_MAX];
+    Frame fr[8];
+    static const Node blade[] = {
+        { 546.6f, 170.0f, 2.6f, 3.5f },
+        { 546.4f, 161.0f, 2.6f, 3.2f },
+        { 545.8f, 153.0f, 2.5f, 2.7f },
+        { 544.0f, 147.0f, 2.5f, 2.2f },
+        { 540.6f, 143.6f, 2.4f, 1.9f },
+        { 536.6f, 142.2f, 2.3f, 1.6f },
+        { 533.6f, 142.4f, 2.2f, 1.3f },
+        { 531.6f, 143.8f, 2.0f, 1.1f },   // the tip turns back up, which is the whole character of the hook
     };
-    Hex(s, trig);
+    int n = RoundRect(sect, 0.5f, 3);
+    NodeFrames(fr, blade, 8);
+    Sweep(s, sect, n, fr, 8, true, true);
 
-    // Body up to the pin, so the blade hangs off something rather than floating below its own pivot.
+    // Body up to the pin, so the blade hangs off something rather than floating below its own pivot. Narrowed to the blade's own width and taken from the blade's top station rather than from a second copy of it, since the two have drifted apart once already.
     Vector3 body[8] = {
-        { -2.5f, 152.0f, 545.0f }, { 2.5f, 152.0f, 545.0f }, { 2.5f, 152.0f, 556.0f }, { -2.5f, 152.0f, 556.0f },
-        { -2.5f, TRIG_PIVOT_Y + 5.0f, 545.0f }, { 2.5f, TRIG_PIVOT_Y + 5.0f, 545.0f },
-        { 2.5f, TRIG_PIVOT_Y + 5.0f, 556.0f }, { -2.5f, TRIG_PIVOT_Y + 5.0f, 556.0f },
+        { -2.6f, blade[0].y - 1.0f, 543.5f }, { 2.6f, blade[0].y - 1.0f, 543.5f },
+        { 2.6f, blade[0].y - 1.0f, 555.0f }, { -2.6f, blade[0].y - 1.0f, 555.0f },
+        { -2.6f, TRIG_PIVOT_Y + 4.0f, 543.5f }, { 2.6f, TRIG_PIVOT_Y + 4.0f, 543.5f },
+        { 2.6f, TRIG_PIVOT_Y + 4.0f, 555.0f }, { -2.6f, TRIG_PIVOT_Y + 4.0f, 555.0f },
     };
     Hex(s, body);
     Tube(s, (Vector3){ -3.6f, TRIG_PIVOT_Y, TRIG_PIVOT_Z }, (Vector3){ 3.6f, TRIG_PIVOT_Y, TRIG_PIVOT_Z }, 2.6f, 2.6f, 14, true, true);
@@ -2182,7 +2223,11 @@ const Scene SCENE = {
         "handguards: upper and lower wooden shells swept along authored sections rather than plain rounded rectangles, the lower one with flat cheeks carrying a finger groove and a narrowed underside, the upper a rounded trapezoid drawn in toward its crown; they meet at a 1.5 seam that hides the barrel exactly as the reference does, and end in a 14 wide steel retaining band at z 338 to 352, aft of which the receiver front carries the junction down to y 171.\n"
         "receiver: core at half-width 14.0 with side plates out to 17.2 laid down as panels around two real openings, the milled lightening cut z 380 to 458 on both flanks and, on the right only, the ejection port z 395 to 455 opening into a cavity that shows the bolt carrier plus the separate 7 mm charging-handle track z 455 to 540 cut only through the 3.2 wall; both windows get 5 mm corner fillets and a 2.5 mm 45-degree rim bevel, since 3.2 mm of depth in a 34.4 wide receiver cannot define a pocket on its own. Dust cover swept on a domed section, near-vertical sided with the crown over the top third. Rear sight base tapering in plan with leaf, rails, slider and tangent lever; right-hand selector lever standing 3.3 proud on its pivot boss, charging handle, rivets.\n"
         "magazine: both walls are arcs about a common centre at (z 248, y 202) on the bore line, radius 177.1 front and 236.5 rear, swept from -8 to -57.5 degrees, with five pressed ribs a side and a floorplate.\n"
-        "fire_control: trigger guard bow 6.2 deep and 16 wide, swept through six frames so it follows the measured sag from y 135.8 at z 510 to 132.3 at 550 as one continuous contour rather than running as a straight bar, its two webs, trigger, magazine catch, wooden pistol grip swept along an axis raked 17 degrees with a palm swell at the heel.\n"
+        "fire_control: trigger guard bow 6.2 deep and 16 wide, swept through six frames so it follows the measured sag from y 135.8 at z 510 to 132.3 at 550 as one continuous contour rather than running as a straight bar, its two webs, the magazine catch, and the wooden pistol grip.\n"
+        "The grip, the trigger and the catch were all re-cut against ref_05 read at 4x, at 0.390 mm/px, after review called the trigger thick and strangely shaped, the catch a single lump where the rifle has two parts, and the grip un-ergonomic. All three were the same fault: an envelope in the right place with the wrong shape inside it.\n"
+        "  grip: nine swept stations rather than five. The half depth was running 31 to 19.5 evenly from receiver to toe, which is a wedge with nothing to hold; the rifle holds 29.8 at y 153, is still at 26 by y 112, gives up most of the rest by y 75 and rounds off hard over the last 12 mm. Measuring the centreline from both edges also puts in the front's concavity, 1 to 3 mm aft of its own chord all the way down, which is the finger relief. The section's corner radius went 0.24 to 0.45, since four near-square corners down the length of it were the other half of reading as a slab.\n"
+        "  trigger: a swept ribbon about 5 wide and 7 to 2.6 thick, hanging from the pin, sweeping down and forward and turning its tip back up into the hook. It was two hexahedra filling the whole triangle between the pin and the guard, which read as a shark fin. The sweep is what makes the hook possible at all: hh is a thickness perpendicular to the path, so one number is a thickness in z while the blade hangs and a thickness in y once the toe has turned forward.\n"
+        "  magazine catch: the boss and the catch, which is what the rifle has. The boss is 17 by 21 riveted under the receiver behind the magazine, its roof taken from RecvFloor and buried 1.5 mm up into it rather than typed flat, since that floor drops 1.4 mm across the boss. The catch is 14 mm of plate hanging out of the boss's underside, raked aft and tapering to the tip a thumb pushes.\n"
         "stock: wrist ferrule tapering into the wood, wooden butt swept through seventeen flat-cheeked sections so the comb rise at z 720 to 736 comes out as a curve rather than a step, the last section plane tilted onto the raked butt face so the rake is in the wood and not just the buttplate; left-side sling swivel loop.\n"
         "\n"
         "Surfaces carry procedural diffuse maps, 512x512 images generated at init and shared by every part: wood, milled steel, phosphate grey, blued and brass. Milled steel is generated twice and carried as two materials, MAT_MILLED for the blued receiver and MAT_STEEL for the bare bolt and piston, which differ in colour and not in surface.\n"
