@@ -2,6 +2,13 @@
 
 Raylib 3D models and animations, written by Claude Code and reviewed by Codex.
 
+|                                                                   |
+| :---------------------------------------------------------------: |
+|                 AK-47 firing a three-round burst                  |
+|    ![AK-47 firing a three-round burst](assets/ak47_anim.webp)     |
+|                HMMWV driving over a periodic road                 |
+| ![HMMWV driving over a periodic road](assets/humvee_v3_anim.webp) |
+
 ## Usage
 
 **Preview**: opens a window on the model. Drag to orbit, wheel to zoom, space toggles the spin, R resets the camera, ESC quits.
