@@ -2665,11 +2665,33 @@ static Motion gMotion[MAX_FRAG];
 // read exactly that: the roof sitting level over a frame the facade had come off, as though the
 // skin had been blown away rather than the building losing its footing. A panelka's upper mass
 // starts down as soon as the bottom of it stops holding, which is what this is.
+// How long after its own charges fire the crush front reaches height y.
+static float CrushReach(float y, float frontV) { return fmaxf(0.0f, y - CUT_TOP) / frontV; }
+
+// How fast a piece at height y is descending on the ride, and how far it has come.
+//
+// Two regimes, and the second one was missing. While the front is still below the piece, the piece comes down as the storeys under it are consumed, at frontV * CRUSH_LOSS. Once the front has passed it there is nothing under it at all, so it is simply falling: it keeps the speed it had and gravity takes it from there.
+//
+// The first version clamped the front to the piece's own height and stopped. A piece therefore descended while the front climbed to it and then hung motionless, in mid-air, until its own release time -- which for the skin is 0.42 s plus jitter later, so around half a second of a three-second collapse. That is the row of window frames and wall panels stuck at third-floor height above a building that had already gone: not stuck as in frozen after landing, but stuck as in genuinely not moving, because nothing was moving them.
+static float CrushSpeed(float seq, float frontV, float y, float t)
+{
+    float a = t - T_BLAST - seq;
+    if (a <= 0.0f || y <= CUT_TOP) return 0.0f;
+    float reach = CrushReach(y, frontV);
+    float ride = frontV * CRUSH_LOSS;
+    return (a <= reach) ? ride : ride + GRAV * (a - reach);
+}
+
 static float CrushDrop(float seq, float frontV, float y, float t)
 {
-    float front = CUT_TOP + frontV * fmaxf(0.0f, t - T_BLAST - seq);
-    front = fminf(front, y);
-    return fmaxf(0.0f, front - CUT_TOP) * CRUSH_LOSS;
+    float a = t - T_BLAST - seq;
+    if (a <= 0.0f || y <= CUT_TOP) return 0.0f;
+    float reach = CrushReach(y, frontV);
+    float ride = frontV * CRUSH_LOSS;
+    float drop = (a <= reach) ? ride * a
+                              : ride * reach + ride * (a - reach) + 0.5f * GRAV * (a - reach) * (a - reach);
+    // It cannot ride below the ground it is standing over.
+    return fminf(drop, fmaxf(0.0f, y - 0.20f));
 }
 
 // How far over a piece has gone by the time the crush below has carried it down `drop` metres.
@@ -2784,6 +2806,8 @@ static void PlanFragment(int i)
     m->seq = seq;
     m->drop = CrushDrop(seq, m->frontV, wc.y, m->t0);
     m->lean = LeanAt(m, m->drop);
+    // Carried over from the ride, so the piece does not stall at the moment it lets go. Without it the flight starts from rest and a panel that was coming down at 8 m/s appears to stop dead and begin again.
+    m->v0.y -= CrushSpeed(seq, m->frontV, wc.y, m->t0);
     m->rest = wc;
     m->rest.y -= m->drop;
     // A provisional flight time against bare ground, which is only used to put the fragments into
@@ -3031,6 +3055,16 @@ static Matrix FlightPose(int i, float t)
     return PoseAtTau(i, fminf(t, gMotion[i].t1) - gMotion[i].t0);
 }
 
+// Where a piece of the building is at time t: riding the crush until it lets go, flying after.
+//
+// One function, because Update had this logic and CheckHover then wrote it again and got it wrong: asking FlightPose for a time before release returns the pose it will have *at* release, which is stationary, so the check reported a two-second hover that no frame of the render has. A check that does not pose the piece the way the renderer poses it is measuring its own copy of the model.
+static Matrix BuildingPose(int i, float t)
+{
+    const Motion *m = &gMotion[i];
+    if (t > m->t0) return FlightPose(i, t);
+    return RidePose(i, CrushDrop(m->seq, m->frontV, m->rest.y + m->drop, t));
+}
+
 // How far a fragment reaches in each axis at a given moment of its tumble. The linear part of the
 // pose maps the local box's half-extents, so the support function of the transformed box is the
 // sum of the absolute contributions -- which is the whole of Codex's second finding: m->half was
@@ -3246,13 +3280,7 @@ static void Update(float t)
 
         if (IsBuilding(f->type)) {
             gFragTint[i] = tint;
-            if (t > gMotion[i].t0) {
-                gFragMat[i] = FlightPose(i, t);
-            } else {
-                // Still standing, but riding down on whatever is being crushed under it, and going over as it goes down. The drop at its own release time is exactly what FlightPose starts from, so the two meet without a step.
-                float drop = CrushDrop(gMotion[i].seq, gMotion[i].frontV, gMotion[i].rest.y + gMotion[i].drop, t);
-                gFragMat[i] = RidePose(i, drop);
-            }
+            gFragMat[i] = BuildingPose(i, t);
         } else {
             gFragTint[i] = tint;
             gFragMat[i] = YardPose(i, t);
@@ -3672,6 +3700,45 @@ static void CheckHandover(void)
     }
 }
 
+// The longest any piece of the building hangs motionless in mid-air.
+//
+// This is the defect that was found twice from screenshots and missed twice from reasoning, so it gets measured rather than argued about. A piece high above the ground and not moving is either resting on something -- and nothing is up there -- or it is a hole in the motion model.
+//
+// Sampled at 25 ms over the whole cycle, counting only a piece whose centroid is more than 2 m up and moving slower than 1 m/s. The old ride left the skin stationary for the 0.42 s between the front passing it and its own release; anything approaching that again is the same bug returning.
+#define HOVER_STEP   0.025f
+#define HOVER_SLOW   1.00f
+#define HOVER_HIGH   2.00f
+
+static void CheckHover(void)
+{
+    float worst = 0.0f;
+    int worstAt = -1;
+    for (int i = 0; i < gFragCount; i++) {
+        if (!IsBuilding(gFrag[i].type)) continue;
+        const Motion *m = &gMotion[i];
+        // From its own charges, not from the first: a piece at the far end of the block is still standing on an intact storey until the sequence reaches it, and standing on something is not hanging from nothing.
+        float from = T_BLAST + m->seq;
+        float run = 0.0f;
+        Vector3 prev = Vector3Transform(m->c, BuildingPose(i, from));
+        for (float t = from + HOVER_STEP; t < CYCLE; t += HOVER_STEP) {
+            Vector3 now = Vector3Transform(m->c, BuildingPose(i, t));
+            // Once it has landed it is allowed to sit still; before that it is not.
+            bool moving = Vector3Distance(now, prev) > HOVER_SLOW * HOVER_STEP;
+            if (t > m->t1 || now.y < HOVER_HIGH || moving) run = 0.0f;
+            else {
+                run += HOVER_STEP;
+                if (run > worst) { worst = run; worstAt = i; }
+            }
+            prev = now;
+        }
+    }
+    TraceLog(LOG_INFO, "panelka: the longest any piece hangs still in mid-air is %.2f s (%s)",
+             worst, worstAt >= 0 ? TYPE_NAME[gFrag[worstAt].type] : "none");
+    if (worst > 0.15f) {
+        TraceLog(LOG_WARNING, "panelka: a piece hangs motionless above the ground for %.2f s", worst);
+    }
+}
+
 // A demolition is not periodic, and this is the one model here whose loop deliberately does not
 // close. Rather than pretend, measure the seam: the largest distance any fragment has moved
 // between the start of the cycle and its end. That number is the size of the jump a viewer sees
@@ -3844,6 +3911,7 @@ static void Init(void)
     CheckPileGrid();
     CheckCollapse();
     CheckHandover();
+    CheckHover();
     CheckFlashSampling();
     CheckLoopSeam();
 }
