@@ -2609,6 +2609,9 @@ typedef struct {
     Vector3 v0;
     Vector3 acc;     // sideways acceleration through the fall; y is gravity's and is not kept here
     Vector3 axis;    // tumble axis, in the fragment's own frame
+    Vector3 leanAxis; // horizontal, so that turning about it tips the piece away from the building
+    float leanRate;  // radians of lean per metre the crush front has carried it down
+    float lean;      // how far over it already was at the moment it let go
     float omega;
     Vector3 c;       // local centroid, which is what it tumbles about
     Vector3 rest;    // world position of that centroid at the moment it lets go
@@ -2632,6 +2635,16 @@ static float CrushDrop(float seq, float y, float t)
     float front = CUT_TOP + FRONT_V * fmaxf(0.0f, t - T_BLAST - seq);
     front = fminf(front, y);
     return fmaxf(0.0f, front - CUT_TOP) * CRUSH_LOSS;
+}
+
+// How far over a piece has gone by the time the crush below has carried it down `drop` metres.
+//
+// A wall standing on a storey that is being destroyed does not descend rigidly and upright. It has no out-of-plane stability worth anything once the floors bracing it are gone -- a 0.30 m panel eleven metres wide is a card -- so it starts over as soon as its footing does. Riding the front down as a pure translation is what left a gable standing vertical and perfectly planar four metres into its own collapse, which is the one thing about this sequence nobody could look at and believe.
+//
+// Capped, because past about a third of a turn the piece is no longer leaning, it is falling, and by then its own release has come.
+static float LeanAt(const Motion *m, float drop)
+{
+    return fminf(m->leanRate * drop, 1.05f);
 }
 
 static float Rand01(int i, int k) { return Hash2(i, k, 4096, 977u); }
@@ -2719,11 +2732,22 @@ static void PlanFragment(int i)
         m->acc = (Vector3){ 1.5f * Rand11(i, 28), 0.0f, sz * push };
     }
     m->axis = Vector3Normalize((Vector3){ Rand11(i, 13) + 0.05f, Rand11(i, 14) * 0.4f, Rand11(i, 15) });
+
+    // Which way it goes over while the crush is still carrying it: away from the spine, about a horizontal axis, so a facade panel leans out and a gable leans off the end of the block.
+    Vector3 outward = (Vector3){ (fabsf(wc.x) > BLOCK_LEN * 0.5f - 1.0f) ? wc.x : 0.0f, 0.0f, wc.z };
+    // A piece on the spine itself has no outward direction; give it one rather than a zero axis, which MatrixRotate would turn into NaN.
+    if (Vector3Length(outward) < 1e-4f) outward = (Vector3){ 0.0f, 0.0f, 1.0f };
+    outward = Vector3Normalize(outward);
+    m->leanAxis = (Vector3){ outward.z, 0.0f, -outward.x };
+    // The skin has nothing holding it and goes over fastest; the frame is tied at both ends and holds its line longer.
+    m->leanRate = ((cls == FC_SKIN) ? 0.150f : (cls == FC_STRUCT) ? 0.055f : 0.0f)
+                * (0.55f + 0.90f * Rand01(i, 31));
     m->omega = (glazed ? 3.4f : balcony ? 1.9f : cls == FC_CONTENTS ? 2.6f : cls == FC_STRUCT ? 1.25f : 0.7f) * (0.5f + Rand01(i, 16)) * (Rand01(i, 17) < 0.5f ? -1.0f : 1.0f);
 
     m->t0 = fmaxf(m->t0, T_BLAST + seq);
     m->seq = seq;
     m->drop = CrushDrop(seq, wc.y, m->t0);
+    m->lean = LeanAt(m, m->drop);
     m->rest = wc;
     m->rest.y -= m->drop;
     // A provisional flight time against bare ground, which is only used to put the fragments into
@@ -2915,11 +2939,32 @@ static void PoseDust(float t)
 #define CYCLE 6.0f
 
 // A fragment tau seconds into its flight: ballistic about its own centroid.
+// The lean, applied about a world-space axis through the piece's own centroid. It has to go on after the rest yaw, because that is the frame the axis was worked out in.
+static Matrix ApplyLean(Matrix M, int i, float lean)
+{
+    const Fragment *f = &gFrag[i];
+    const Motion *m = &gMotion[i];
+    Vector3 wsc = Vector3Transform(Vector3Scale(m->c, f->scale), MatrixRotateY(f->yaw * DEG2RAD));
+    M = MatrixMultiply(M, MatrixTranslate(-wsc.x, -wsc.y, -wsc.z));
+    M = MatrixMultiply(M, MatrixRotate(m->leanAxis, lean));
+    return MatrixMultiply(M, MatrixTranslate(wsc.x, wsc.y, wsc.z));
+}
+
+// Where a piece sits while the crush below is still carrying it: dropped by `drop`, and leaned over by however far that drop has taken it.
+static Matrix RidePose(int i, float drop)
+{
+    const Fragment *f = &gFrag[i];
+    Matrix M = MatrixScale(f->scale, f->scale, f->scale);
+    M = MatrixMultiply(M, MatrixRotateY(f->yaw * DEG2RAD));
+    M = ApplyLean(M, i, LeanAt(&gMotion[i], drop));
+    return MatrixMultiply(M, MatrixTranslate(f->pos.x, f->pos.y - drop, f->pos.z));
+}
+
 static Matrix PoseAtTau(int i, float tau)
 {
     const Fragment *f = &gFrag[i];
     const Motion *m = &gMotion[i];
-    if (tau <= 0.0f) return FragRest(f);
+    if (tau < 0.0f) tau = 0.0f;
 
     Vector3 d = {
         m->v0.x * tau + 0.5f * m->acc.x * tau * tau,
@@ -2928,14 +2973,15 @@ static Matrix PoseAtTau(int i, float tau)
     };
     Vector3 sc = Vector3Scale(m->c, f->scale);
 
-    // Scale, then swing about the fragment's own centroid, then take the rest yaw, then place.
-    // Rotating about the local origin instead would spin a facade panel about its bottom inner
-    // corner, which is a hinge no broken panel has.
+    // Scale, then swing about the fragment's own centroid, then take the rest yaw, then the lean it already had when it let go, then place.
+    // Rotating about the local origin instead would spin a facade panel about its bottom inner corner, which is a hinge no broken panel has.
+    // At tau = 0 the tumble and the ballistic step are both nothing, so this is exactly RidePose at the drop it let go from: the ride and the flight meet without a step, which they have to, because the piece is visible through both.
     Matrix M = MatrixScale(f->scale, f->scale, f->scale);
     M = MatrixMultiply(M, MatrixTranslate(-sc.x, -sc.y, -sc.z));
     M = MatrixMultiply(M, MatrixRotate(m->axis, m->omega * tau));
     M = MatrixMultiply(M, MatrixTranslate(sc.x, sc.y, sc.z));
     M = MatrixMultiply(M, MatrixRotateY(f->yaw * DEG2RAD));
+    M = ApplyLean(M, i, m->lean);
     return MatrixMultiply(M, MatrixTranslate(f->pos.x + d.x, f->pos.y + d.y - m->drop, f->pos.z + d.z));
 }
 
@@ -3163,11 +3209,9 @@ static void Update(float t)
             if (t > gMotion[i].t0) {
                 gFragMat[i] = FlightPose(i, t);
             } else {
-                // Still standing, but riding down on whatever is being crushed under it. The drop
-                // at its own release time is exactly what FlightPose starts from, so the two meet
-                // without a step.
+                // Still standing, but riding down on whatever is being crushed under it, and going over as it goes down. The drop at its own release time is exactly what FlightPose starts from, so the two meet without a step.
                 float drop = CrushDrop(gMotion[i].seq, gMotion[i].rest.y + gMotion[i].drop, t);
-                gFragMat[i] = MatrixMultiply(FragRest(f), MatrixTranslate(0.0f, -drop, 0.0f));
+                gFragMat[i] = RidePose(i, drop);
             }
         } else {
             gFragTint[i] = tint;
@@ -3566,6 +3610,28 @@ static void CheckCollapse(void)
     }
 }
 
+// A piece is drawn by two different functions in one cycle -- RidePose while the crush is still carrying it, PoseAtTau once it lets go -- and they have to agree exactly at the moment of handover or every fragment in the building pops as it releases.
+//
+// They agree by construction: at tau = 0 the tumble and the ballistic step are both nothing, and PoseAtTau is then the same scale, yaw, lean and drop that RidePose builds. By construction is not the same as measured, and the lean went into one of them before it went into the other.
+static void CheckHandover(void)
+{
+    float worst = 0.0f;
+    int worstAt = -1;
+    for (int i = 0; i < gFragCount; i++) {
+        if (!IsBuilding(gFrag[i].type)) continue;
+        const Motion *m = &gMotion[i];
+        Vector3 a = Vector3Transform(m->c, RidePose(i, m->drop));
+        Vector3 b = Vector3Transform(m->c, PoseAtTau(i, 0.0f));
+        float d = Vector3Distance(a, b);
+        if (worstAt < 0 || d > worst) { worst = d; worstAt = i; }
+    }
+    TraceLog(LOG_INFO, "panelka: the ride and the flight meet to %.4f m at the worst fragment (%s)",
+             worst, worstAt >= 0 ? TYPE_NAME[gFrag[worstAt].type] : "-");
+    if (worst > 0.01f) {
+        TraceLog(LOG_ERROR, "panelka: a fragment jumps %.3f m at the moment it lets go", worst);
+    }
+}
+
 // A demolition is not periodic, and this is the one model here whose loop deliberately does not
 // close. Rather than pretend, measure the seam: the largest distance any fragment has moved
 // between the start of the cycle and its end. That number is the size of the jump a viewer sees
@@ -3737,6 +3803,7 @@ static void Init(void)
     CheckNothingBuried();
     CheckPileGrid();
     CheckCollapse();
+    CheckHandover();
     CheckFlashSampling();
     CheckLoopSeam();
 }
@@ -3800,14 +3867,14 @@ const Scene SCENE = {
         "A 1-464 has no frame: every cross wall carries load, which is why the series went up so fast and why it comes down the way it does. Charges are drilled into the cross walls of the bottom two storeys and fired in a sequence running the length of the block, so the building loses its footing progressively and folds instead of toppling; what is above the cut then descends almost vertically and pancakes, with the facade panels peeling off outwards because nothing holds them on once the cross walls behind them are gone.\n"
         "Which of those a fragment is comes off a table keyed by type rather than a range test on the enum. An earlier build asked whether the type was at or below the last panel to decide it was skin, which is correct exactly as long as nobody inserts a type, and this revision inserts thirty; a misfiled type there is silent, because the piece simply falls with the wrong timing among two thousand others.\n"
         "Every fragment does three things and no more.\n"
-        "It rides down. The crush front leaves the cut when the charges under that part of the block fire and climbs at 11 m/s, and everything above it descends by 0.62 of the height that has gone underneath it, because that is what a crushed storey loses. Without it a fragment waits in place until the front arrives and the roof sits level over a stripped frame.\n"
+        "It rides down, and goes over as it does. The crush front leaves the cut when the charges under that part of the block fire and climbs at 11 m/s, and everything above it descends by 0.62 of the height that has gone underneath it, because that is what a crushed storey loses. Without that a fragment waits in place until the front arrives and the roof sits level over a stripped frame. It also leans, away from the spine, at 0.15 rad per metre it is carried down for the skin and 0.055 for the frame, capped at 1.05. A wall standing on a storey that is being destroyed has no out-of-plane stability worth anything once the floors bracing it are gone -- a 0.30 m panel eleven metres wide is a card -- so it starts over as soon as its footing does. Riding the front down as a pure translation is what left a gable standing vertical and perfectly planar four metres into its own collapse. The ride and the flight are two different functions drawing the same piece in one cycle, so CheckHandover measures where they meet: at the moment of release they agree to 0.0000 m, which they have to, because a piece is visible through both.\n"
         "It flies, tumbling about its own centroid rather than its local origin, which would be a hinge no broken panel has. The drop it had already taken at its release time is exactly where the flight starts, so the two meet without a step. Not quite ballistically: it also carries a sideways acceleration through the fall, and which way sideways is depends on how high up it started. At the bottom the storeys are being crushed and their material is extruded outward -- the same event the base surge in the dust is, and what throws the lowest debris furthest from the footprint. At the top there is nothing above to push anything anywhere and the perimeter underneath is peeling away, so the roof and the top storey lose their edge support and drop into the void rather than out of it, which is the inward fold a demolition has in every film of one. The sign changes 0.62 of the way up, which is a storey above the cut and is chosen rather than derived. The strength scales with how near the middle of the block a piece is, where the fold is deepest and the most air and debris are being driven out of the storey collapsing under it. Without that the horizontal motion is constant and every path is a straight line in plan -- a facade peels as a sheet of parallel tracks and a cross wall drops on a ruler. A constant per fragment is enough: the path is then a parabola in plan as well as in elevation and the tracks bend apart. Glass and balconies are left out, because they leave before there is any storey being crushed under them to push them. The inward half of it concentrates the pile toward the centreline, which is why the packed crest stands further above the smooth-mound prediction than it did: the prediction spreads everything evenly over the footprint and the skirt, and an implosion does not.\n"
         "And it lands. There is no contact between fragments in flight: nothing here resolves a collision, because at this scale what reads is the timing and the peel rather than any individual impact.\n"
         "Four in five facade panels crack as they go, at the side of an opening, which is where the section is thinnest; the blank gable has no opening, so its break is simply off centre, because two congruent halves read as a cut rather than as a fracture. It is three in five rather than all of them because a demolition leaves some panels whole and a facade every one of which cracks identically reads as a pattern rather than as damage. A break is not an edge: where a slice ends inside the panel both layers run past it instead of setting back, so the two halves are indistinguishable from the whole panel until they separate.\n"
         "Glazing is the exception to the crush front: every pane in the building goes at the shock rather than when its own storey is reached, spinning five times faster than a panel -- but leaving at 1.1 to 2.8 m/s, not the 3.6 to 7.8 it once had. A balcony fails as its own storey is reached and 0.12 s after it, not 0.22 s before. The skin waits 0.42 s behind the structure at its own height, where a first attempt used 0.20, plus a quarter second of its own: every panel of a gable shares an x and so shares a firing delay, and its release otherwise depends only on how high it is, so twenty of them let go on the same instant and the wall came away as one flat plane standing perfectly coplanar beside a field of rubble.\n"
         "All three of those numbers moved for one reason. A review round read the first second of the sequence as the skin being explosively removed from a standing building rather than as a building losing its footing: 210 panes leaving at 8 m/s and a ring of balconies in the air while nothing above them had moved yet. The peel now has to come out of the tumble and the fall rather than out of a kick, which is what it comes out of in the films. Structural pieces also get their own release jitter of up to 0.19 s, because sharing a release time to the millisecond kept the roof legible as a complete deck through the middle of the sequence, sitting in its original plane over a facade that had already gone.\n"
         "\n"
-        "Where a piece comes to rest is decided by what is already there. The pile is a heightfield, and the fragments are planned in the order they land: each is put on top of whatever is in the cells its own footprint covers, and then deposits its own material -- volume by the divergence theorem, bulked by 1.55 -- spread over that footprint. 1737 m3 becomes 2693 of rubble and the packed pile crests at 6.2 m, against 3.9 m for a smooth mound of the same material. The packed pile stands higher because it puts its material where the pieces actually land, which is mostly over the footprint, where the prediction spreads everything evenly over the footprint and the skirt together.\n"
+        "Where a piece comes to rest is decided by what is already there. The pile is a heightfield, and the fragments are planned in the order they land: each is put on top of whatever is in the cells its own footprint covers, and then deposits its own material -- volume by the divergence theorem, bulked by 1.55 -- spread over that footprint. 1737 m3 becomes 2693 of rubble and the packed pile crests at 5.8 m, against 3.9 m for a smooth mound of the same material. The packed pile stands higher because it puts its material where the pieces actually land, which is mostly over the footprint, where the prediction spreads everything evenly over the footprint and the skirt together.\n"
         "Every cubic metre of that is a cubic metre the building was built from. It did not use to be: 800 lumpy ellipsoids used to be scattered through the collapsing volume as stand-in rubble, carrying 331 m3 of concrete that was in no panel and no slab, spawning from nothing in mid-air and thrown harder than anything else in the scene. They were written when nothing in the building could break, and they were kept -- and doubled -- after the panel fracture and the plate cells had made them unnecessary. The pile is a fifth shorter without them, which is the correct height rather than a loss.\n"
         "What a piece rests on is weighted towards the mean of the cells under it rather than their maximum. Taking the maximum is what a rigid plate really does, and it is what this did until the slabs and walls were broken into thirds; with three thousand fragments each perching on the last one\'s high corner the error compounded and the crest ran to 8.5 m on a 14.3 m building, where a real demolition pile is a quarter to a third of the building\'s height. The weight is the one number in the collapse fitted to an outcome rather than derived, and CheckCollapse prints the packed crest against the smooth-mound prediction on every build so that the fit stays visible.\n"
         "Both the landing point and the fragment\'s own extent depend on the flight time, and the flight time on both, so each is solved by four passes of the same substitution. The extent is taken at the orientation the piece actually lands in, from the support function of its transformed box, not from its upright height: a 2.66 m panel that comes down edge-on has a vertical extent of 0.15.\n"
@@ -3823,7 +3890,7 @@ const Scene SCENE = {
         "\n"
         "This is the one model here whose loop deliberately does not close. A demolition is a one-shot event, and --anim plays it once; rather than pretend otherwise, CheckLoopSeam measures the seam and reports it, and it is 12.9 m at the worst fragment. The last piece lands at 3.7 s of the 6 s cycle, thrown up to 8.0 m clear of the footprint.\n"
         "\n"
-        "Thirteen build-time checks, of which three are about this revision and all three earned their place on the run that added them. CheckTypesBuilt reports any type that is placed and has no mesh -- which with sixty types, eleven of them differing from a neighbour only by which half of a panel they are, is the failure this decomposition is most exposed to -- and any type built and never placed, which is how the ground-floor balconies were caught. CheckFlatVariety counts what the flat hashes actually produced, because a seed that collapsed or a table indexed past its end would leave the facade uniform again without anything failing.\n"
+        "Fourteen build-time checks, of which three are about this revision and all three earned their place on the run that added them. CheckTypesBuilt reports any type that is placed and has no mesh -- which with sixty types, eleven of them differing from a neighbour only by which half of a panel they are, is the failure this decomposition is most exposed to -- and any type built and never placed, which is how the ground-floor balconies were caught. CheckFlatVariety counts what the flat hashes actually produced, because a seed that collapsed or a table indexed past its end would leave the facade uniform again without anything failing.\n"
         "CheckStructureInside measures how far any slab, cross wall or spine reaches past the skin it stands behind, and it is the check the block\'s ends needed and did not have. The cross wall closing each end was centred on the block\'s end plane, so it stood 0.07 m outside the gable and hid all twenty of its panels behind a blank grey strip banded once per storey by its own gap at each floor. That survived the first build and two review rounds, because what a critique could say was that the gable read as under-divided, which sent two sessions looking at the gable\'s own decomposition, where the gable was not what was being drawn there at all. A defect that hides the thing you would inspect to find it is not found by looking harder. The wall is now pulled inboard until its outer face is buried 10 mm inside the panel, derived from that panel rather than typed.\n"
         "\n"
         "--part frames the building\'s parts on their rest pose rather than on the swept cycle. Sweeping them gives the whole debris field, which frames every part identically and destroys exactly what --part exists for; only the debris and the dust, which have no rest pose worth framing, are swept.\n"
