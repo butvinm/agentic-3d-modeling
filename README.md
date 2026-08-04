@@ -2,10 +2,11 @@
 
 Raylib 3D models and animations, written by Claude Code and reviewed by Codex.
 
-|                                           Examples                                           |
-| :------------------------------------------------------------------------------------------: |
-|  ![AK-47 firing a three-round burst](assets/ak47.webp) **AK-47 firing a three-round burst**  |
-| ![HMMWV under way on a rough track](assets/humvee.webp) **HMMWV under way on a rough track** |
+|                                                                 Examples                                                                  |
+| :---------------------------------------------------------------------------------------------------------------------------------------: |
+|                        ![AK-47 firing a three-round burst](assets/ak47.webp) **AK-47 firing a three-round burst**                         |
+|                       ![HMMWV under way on a rough track](assets/humvee.webp) **HMMWV under way on a rough track**                        |
+| ![1-464 khrushchyovka taken down by controlled explosion](assets/panelka.webp) **1-464 khrushchyovka taken down by controlled explosion** |
 
 ## Usage
 
